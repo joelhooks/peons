@@ -1,6 +1,7 @@
 {
   "name": "@joelhooks/peons",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Warm agent templates, forked per request: the peon catalog.",
   "packageManager": "pnpm@10.18.0",
