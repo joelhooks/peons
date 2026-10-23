@@ -1,0 +1,179 @@
+{
+  "schema": "agent-graph.routing.v0.1",
+  "version": 1,
+  "scheme": {
+    "id": "worktype-v1",
+    "version": 2,
+    "concepts": {
+      "work": {
+        "broader": []
+      },
+      "bugfix": {
+        "broader": [
+          "work"
+        ]
+      },
+      "refactor": {
+        "broader": [
+          "work"
+        ]
+      },
+      "investigation": {
+        "broader": [
+          "work"
+        ]
+      },
+      "investigation_review": {
+        "broader": [
+          "investigation"
+        ]
+      },
+      "research": {
+        "broader": [
+          "investigation"
+        ]
+      },
+      "diagnosis": {
+        "broader": [
+          "investigation"
+        ]
+      },
+      "scan": {
+        "broader": [
+          "work"
+        ]
+      },
+      "gather": {
+        "broader": [
+          "work"
+        ]
+      },
+      "ui": {
+        "broader": [
+          "work"
+        ]
+      },
+      "feature": {
+        "broader": [
+          "work"
+        ]
+      },
+      "docs": {
+        "broader": [
+          "work"
+        ]
+      },
+      "review": {
+        "broader": [
+          "work"
+        ]
+      }
+    }
+  },
+  "routes": {
+    "work": {
+      "specialist": {
+        "profile": {
+          "model": "openai-codex/gpt-6.1-sol",
+          "thinking": "medium"
+        }
+      },
+      "status": "provisional",
+      "why": "Fleet default for reasoning, implementation, planning and review.",
+      "source": "fleet prompt, Models section"
+    },
+    "bugfix": {
+      "specialist": {
+        "profile": {
+          "model": "claude-bridge/claude-sonnet-5-5",
+          "thinking": "medium"
+        }
+      },
+      "status": "provisional",
+      "why": "Joel's Claude tier for bug fixes, with owner review.",
+      "source": "Joel 2026-10-10, fleet prompt Models section"
+    },
+    "refactor": {
+      "specialist": {
+        "profile": {
+          "model": "claude-bridge/claude-sonnet-5-5",
+          "thinking": "medium"
+        }
+      },
+      "status": "provisional",
+      "why": "Joel's Claude tier for refactors, with owner review.",
+      "source": "Joel 2026-10-10, fleet prompt Models section"
+    },
+    "investigation": {
+      "specialist": {
+        "peon": "investigation@1"
+      },
+      "status": "provisional",
+      "why": "Catalog v1 investigation template, cell-ready, Sol high; replaces the 10-10 Sonnet profile until outcomes are measured.",
+      "source": "peons catalog.json 96363c3"
+    },
+    "research": {
+      "specialist": {
+        "profile": {
+          "model": "openai-codex/gpt-6-luna",
+          "thinking": "medium"
+        }
+      },
+      "status": "provisional",
+      "why": "Luna medium is the fleet's research and context lane.",
+      "source": "fleet prompt, Models section"
+    },
+    "scan": {
+      "specialist": {
+        "profile": {
+          "model": "claude-bridge/claude-haiku-5-5",
+          "thinking": "low"
+        }
+      },
+      "status": "provisional",
+      "why": "Joel's Haiku tier for quick scans and read-only sweeps.",
+      "source": "Joel 2026-10-10, fleet prompt Models section"
+    },
+    "gather": {
+      "specialist": {
+        "profile": {
+          "model": "claude-bridge/claude-haiku-5-5",
+          "thinking": "low"
+        }
+      },
+      "status": "provisional",
+      "why": "Joel's Haiku tier for data gathering.",
+      "source": "Joel 2026-10-10, fleet prompt Models section"
+    },
+    "ui": {
+      "specialist": {
+        "profile": {
+          "model": "openai-codex/gpt-6.1-sol",
+          "thinking": "medium"
+        }
+      },
+      "status": "provisional",
+      "why": "UI and front-end stay on Opus 5.5 or Sol; Sol is the fleet default of the two.",
+      "source": "Joel 2026-10-10, fleet prompt Models section"
+    },
+    "feature": {
+      "specialist": {
+        "profile": {
+          "model": "openai-codex/gpt-6.1-sol",
+          "thinking": "medium"
+        }
+      },
+      "status": "provisional",
+      "why": "Feature builds stay on Opus 5.5 or Sol; Sol is the fleet default of the two.",
+      "source": "Joel 2026-10-10, fleet prompt Models section"
+    },
+    "review": {
+      "specialist": {
+        "peon": "change-review@1"
+      },
+      "status": "provisional",
+      "why": "Catalog v1 change-review judge template, cell-ready, Sol high.",
+      "source": "peons catalog.json 96363c3"
+    }
+  }
+}

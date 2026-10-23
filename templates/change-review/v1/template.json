@@ -1,0 +1,44 @@
+{
+  "schema": "peons.think-template.v1",
+  "template": "change-review",
+  "version": 1,
+  "kind": "judge",
+  "owner": "pi-durable/desk",
+  "profile": {
+    "model": "sol",
+    "thinking": "high"
+  },
+  "warmup": [
+    {
+      "doc": "rules",
+      "path": "warmup.md",
+      "sha256": "198db4b67241fdec8d7eb3e7a1ffafa65145ce07d43d9585de6c8140af118e41"
+    }
+  ],
+  "prompt": {
+    "path": "prompt.md",
+    "sha256": "c87b85580ee4ee76100dc46c9eb793970e8a08ffe6ab9959cd42fb22448a678f"
+  },
+  "inputs": [
+    {
+      "doc": "criteria",
+      "required": false,
+      "maxBytes": 120000
+    },
+    {
+      "doc": "subject",
+      "required": true,
+      "maxBytes": 400000
+    },
+    {
+      "doc": "evidence",
+      "required": false,
+      "maxBytes": 200000
+    }
+  ],
+  "output": {
+    "doc": "review",
+    "verdict": "peons.verdict.change-review.v1"
+  },
+  "maxSteps": 4
+}

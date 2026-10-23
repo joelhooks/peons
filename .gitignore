@@ -1,0 +1,10 @@
+node_modules/
+runs/
+*.log
+.peons/
+
+# private, never public
+.brain/
+BRAIN.md
+.pi/
+.proof-tmp/

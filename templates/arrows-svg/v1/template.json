@@ -1,0 +1,47 @@
+{
+  "schema": "agent-graph.template-node.v0.1",
+  "template": "arrows-svg",
+  "version": 1,
+  "owner": "arrows-agent/arrows-desk",
+  "profile": {
+    "model": "sol",
+    "thinking": "medium",
+    "tools": [
+      { "name": "quiver.generate_svg", "via": "cli", "timeoutSec": 300 }
+    ],
+    "skills": ["arrow-craft"],
+    "postSteps": [
+      { "name": "themify", "via": "script", "purpose": "mode-honoured" }
+    ],
+    "deferredTools": [
+      { "name": "quiver.vectorize_image", "owner": "arrows-agent/arrows-desk", "note": "REST supports it; add to bin/arrow.ts when a request needs it" },
+      { "name": "quiver.svg_edit", "owner": "arrows-agent/arrows-desk", "note": "POST /v1/svgs/edits on arrow-2; needs its own canary check" },
+      { "name": "quiver.svg_animate", "owner": "arrows-agent/arrows-desk", "note": "POST /v1/svgs/animations on arrow-2; needs its own canary check" }
+    ]
+  },
+  "warmup": [
+    { "kind": "skill", "path": "warmup/arrow-craft/SKILL.md", "sha256": "00854fd49839cd6db50de45805502a6bec818329338e0c518ecf66306f8f941e" },
+    { "kind": "model-notes", "path": "warmup/model-notes.md", "sha256": "0882527e40604837bd788c13b252fc5ab77c848b9b4dc989a30300e7ca6b9ab7" },
+    { "kind": "reference-render", "path": "references/plan.png", "sha256": "145e67b0a6f16db000b3a432e0d8b1f0169d3f72bc1e0b43e68d54748e550e22" },
+    { "kind": "reference-render", "path": "references/plan.svg", "sha256": "844185162ef5131fac656816a3201e2d582a25fa59ace1711f5ec4655507a62d" }
+  ],
+  "ready": {
+    "checkpoint": "arrows-svg@1:ready",
+    "canary": {
+      "status": "set",
+      "theme": "A tiny transit-map fragment: one red line, three stations (Queue, Checks, THE NEST), the Nest as a cheese-wedge terminus, lines as torn coloured cardboard, labels in shaky marker; transparent background",
+      "reference": null,
+      "checks": ["decodes-as-svg", "within-size", "mode-honoured", "jev-structure"]
+    }
+  },
+  "contract": { "input": "ThemeRequest", "output": "ArrowArtifact" },
+  "envelope": {
+    "maxForks": 8,
+    "perForkTimeoutSec": 600,
+    "budgetUsd": 20
+  },
+  "rewarm": {
+    "digestInputs": ["quiver-models", "skill-hashes", "tool-list", "reference-hashes", "model-id"],
+    "check": "stale-while-revalidate: on request after maxAge, on digest drift, or on a cron for hot templates; drift means a new version, a canary pass, then a freeze"
+  }
+}

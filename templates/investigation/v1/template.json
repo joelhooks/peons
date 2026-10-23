@@ -1,0 +1,44 @@
+{
+  "schema": "peons.think-template.v1",
+  "template": "investigation",
+  "version": 1,
+  "kind": "read",
+  "owner": "pi-durable/desk",
+  "profile": {
+    "model": "sol",
+    "thinking": "high"
+  },
+  "warmup": [
+    {
+      "doc": "rules",
+      "path": "warmup.md",
+      "sha256": "9b086caf4cecab43cdb77fbf7d116e7425deab9320c8f4ed5ea472971d5cf6c9"
+    }
+  ],
+  "prompt": {
+    "path": "prompt.md",
+    "sha256": "2e8a58107ab375d458d24e29ff44caeb7dab75cf6925a6f4b0547918f524dc5b"
+  },
+  "inputs": [
+    {
+      "doc": "hypotheses",
+      "required": false,
+      "maxBytes": 40000
+    },
+    {
+      "doc": "evidence",
+      "required": true,
+      "maxBytes": 450000
+    },
+    {
+      "doc": "context",
+      "required": false,
+      "maxBytes": 120000
+    }
+  ],
+  "output": {
+    "doc": "answer",
+    "verdict": "peons.verdict.investigation.v1"
+  },
+  "maxSteps": 4
+}

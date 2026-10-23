@@ -1,0 +1,9 @@
+{
+  "name": "shitrat-call",
+  "main": "index.js",
+  "compatibility_date": "2026-01-01",
+  "durable_objects": {
+    "bindings": [{ "name": "CALL", "class_name": "ShitratCall" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ShitratCall"] }]
+}
