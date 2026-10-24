@@ -1,3 +1,4 @@
+// @effect-diagnostics unstableApiUsage:off -- effect/Arbitrary is the only property-test generator; this file is the boundary
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +16,7 @@ import { compile as compileTemplate } from "../src/think-template.ts";
 import { DESK, ROOT, askTemplate, bool, catalog, forAll, int, pick, reviewTemplate, routing } from "./support.ts";
 
 const request = (fields: Partial<PeonRequest> = {}): PeonRequest =>
-  Schema.decodeUnknownSync(PeonRequest)({
+  Schema.decodeSync(PeonRequest)({
     base: null,
     desk: DESK,
     input: { docs: {}, kind: "brief", text: "Find the three slowest gates." },

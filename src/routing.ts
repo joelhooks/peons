@@ -32,7 +32,7 @@ export type RoutingTable = typeof RoutingTable.Type;
 export type Route = typeof Route.Type;
 export interface Resolved { readonly concept: string; readonly route: Route; readonly tableVersion: number }
 
-export class RouteRefused extends Schema.TaggedError<RouteRefused>()("RouteRefused", {
+export class RouteRefused extends Schema.TaggedError<RouteRefused, { readonly brand: unique symbol }>()("RouteRefused", {
   accepted: Schema.Array(Schema.String),
   reason: Schema.String,
   workType: Schema.String,

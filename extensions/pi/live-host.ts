@@ -61,10 +61,10 @@ const failure = (did: string, why: string, fix: string) =>
   new HostFailure({ message: prompt({ accepted: "a Mischief worker that answers its capability schema", debug: DEBUG, did, fix, tag: "HostFailure", why }).message });
 
 const Declared = Schema.Union([
-  Schema.Struct({ _tag: Schema.Literal("UnknownRun"), runId: Schema.String }),
-  Schema.Struct({ _tag: Schema.Literal("PlanRefused"), errors: Schema.Array(Schema.String) }),
-  Schema.Struct({ _tag: Schema.Literal("ReplyRefused"), reason: Schema.String, replyTo: Schema.String }),
-  Schema.Struct({ _tag: Schema.Literal("AnswerRefused"), reason: Schema.String, runId: Schema.String }),
+  Schema.TaggedStruct("UnknownRun", { runId: Schema.String }),
+  Schema.TaggedStruct("PlanRefused", { errors: Schema.Array(Schema.String) }),
+  Schema.TaggedStruct("ReplyRefused", { reason: Schema.String, replyTo: Schema.String }),
+  Schema.TaggedStruct("AnswerRefused", { reason: Schema.String, runId: Schema.String }),
 ]);
 const decodeDeclared = Schema.decodeUnknownOption(Declared);
 const decodeReport = Schema.decodeUnknownResult(RunReport);
@@ -143,7 +143,7 @@ export const liveEnv = (env: Readonly<Record<string, string | undefined>>, tool:
   const accepted = "MISCHIEF_HOST=<the Mischief worker origin, like http://host:port/> and PEONS_IDENTITY_SECRET=<the agent-secrets name of this desk's Rat King identity>";
   if (missing.length > 0 || endpoint === undefined || secretName === undefined)
     {return prompt({ accepted, debug: DEBUG, did: `called ${tool}`, fix: `export ${missing.map((name) => `${name}=…`).join(" ")} in the desk's environment, /reload, then call ${tool} again`, tag: "HostUnset", why: `${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} not set` });}
-  if (Result.isFailure(Schema.decodeUnknownResult(Endpoint)(endpoint)))
+  if (Result.isFailure(Schema.decodeResult(Endpoint)(endpoint)))
     {return prompt({ accepted, debug: DEBUG, did: `called ${tool}`, fix: `set MISCHIEF_HOST to the worker origin ending in /, /reload, then call ${tool} again`, tag: "HostUnset", why: "MISCHIEF_HOST is not an origin without credentials, path, query or fragment" });}
   return { audience: env.MISCHIEF_AUDIENCE ?? DEFAULT_AUDIENCE, endpoint, secretName };
 };
@@ -164,7 +164,7 @@ export const leasedSigner = (name: string, lease: (name: string) => Effect.Effec
   return Effect.gen(function* leasedSignerGen() {
     if (held !== null && held.until > clock()) {return held.signer;}
     const text = yield* lease(name);
-    const identity = Schema.decodeUnknownResult(Schema.fromJsonString(Identity))(text.trim());
+    const identity = Schema.decodeResult(Schema.fromJsonString(Identity))(text.trim());
     if (Result.isFailure(identity)) {return yield* leaseRefused("the leased value is not a Rat King identity");}
     const key = yield* Effect.tryPromise({
       catch: () => leaseRefused("the identity has no usable ES256 signing key"),

@@ -1,3 +1,4 @@
+// @effect-diagnostics unstableApiUsage:off -- effect/Arbitrary is the only property-test generator; this file is the boundary
 import { Effect, Schema } from "effect";
 import * as Arbitrary from "effect/Arbitrary";
 import { describe, expect, it } from "vitest";
@@ -34,7 +35,7 @@ describe("peon contract", () => {
 
   it("refuses a record without the four-line failure shape", () => {
     expect(() =>
-      Schema.decodeUnknownSync(PeonRecord)({ accepted: "", debug: "y", desk: "front-desk/desk", fix: "x", route: null, runId: "r1", schema: "peons.record.v1", tag: "NoScope", template: "scout", type: "peon.refused" }),
+      Schema.decodeSync(PeonRecord)({ accepted: "", debug: "y", desk: "front-desk/desk", fix: "x", route: null, runId: "r1", schema: "peons.record.v1", tag: "NoScope", template: "scout", type: "peon.refused" }),
     ).toThrow();
   });
 

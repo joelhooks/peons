@@ -57,7 +57,7 @@ export const canonical = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
-export class TemplateCorrupt extends Schema.TaggedError<TemplateCorrupt>()("TemplateCorrupt", { path: Schema.String, reason: Schema.String }) {}
+export class TemplateCorrupt extends Schema.TaggedError<TemplateCorrupt, { readonly brand: unique symbol }>()("TemplateCorrupt", { path: Schema.String, reason: Schema.String }) {}
 
 export const loadTemplate = (dir: string): LoadedTemplate => {
   const spec = Schema.decodeUnknownSync(ThinkTemplate)(JSON.parse(readFileSync(nodePath.join(dir, "template.json"), "utf-8")));
@@ -86,7 +86,7 @@ export interface Compiled {
 }
 
 const refuse = (request: PeonRequest, tag: string, accepted: string, fix: string, debug: string) =>
-  Schema.decodeUnknownSync(PeonRefused)({
+  Schema.decodeSync(PeonRefused)({
     accepted,
     debug,
     desk: request.desk,

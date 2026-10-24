@@ -129,7 +129,7 @@ const templatedStep = (step: WorkflowStep, at: string, loaded: LoadedTemplate, r
   if ((step.input.from ?? []).length > 0) {return refuse("InputRefused", `${at} runs ${named} and lists input.from; a templated step maps its declared inputs in input.docs`, `input.docs with keys from ${spec.inputs.map(({ doc }) => doc).join(", ")}`);}
   const mapped = step.input.docs ?? {};
   const placeholder = Object.fromEntries(Object.keys(mapped).map((name) => [name, `{{docs.${name}}}`]));
-  const request = Schema.decodeUnknownResult(PeonRequest)({ base: null, desk: definition.desk, input: { docs: placeholder, kind: "brief", text: step.input.text }, runId: `${definition.id}-v${definition.version}-${step.id}`, schema: "peons.request.v1", scope: [], target: { kind: "template", template: spec.template, version: spec.version } });
+  const request = Schema.decodeResult(PeonRequest)({ base: null, desk: definition.desk, input: { docs: placeholder, kind: "brief", text: step.input.text }, runId: `${definition.id}-v${definition.version}-${step.id}`, schema: "peons.request.v1", scope: [], target: { kind: "template", template: spec.template, version: spec.version } });
   if (Result.isFailure(request)) {return refuse("InputRefused", `${at} maps input docs that are not slugs: ${issuesOf(request.failure)}`, spec.inputs.map(({ doc }) => doc).join(", "));}
   const compiled = compileTemplate(loaded, request.success);
   if ("type" in compiled) {return promptOfRefused(compiled, `called workflow_define with ${at} on ${named}`);}

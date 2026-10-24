@@ -63,7 +63,7 @@ const loadThink = (dir: string) => Effect.try({ catch: (error) => `${dir} does n
 const loadUnlisted = (dir: string) =>
   Effect.gen(function* loadUnlistedGen() {
     const raw = yield* read(nodePath.join(dir, "template.json"));
-    const node = Schema.decodeUnknownResult(Schema.fromJsonString(TemplateNode), { errors: "all" })(raw.toString("utf-8"));
+    const node = Schema.decodeResult(Schema.fromJsonString(TemplateNode), { errors: "all" })(raw.toString("utf-8"));
     if (Result.isFailure(node)) {return yield* Effect.fail(`${dir}/template.json has no catalog entry and does not decode as a TemplateNode: ${issuesOf(node.failure)}`);}
     if (!frozen(node.success)) {return yield* Effect.fail(`${dir} is not frozen yet (warmup, canary or budget pending)`);}
     for (const ref of isPending(node.success.warmup) ? [] : node.success.warmup) {
@@ -84,7 +84,7 @@ const drift = (entry: CatalogEntry, loaded: LoadedTemplate) => {
 const decodeFile = <S extends Schema.Top & { readonly DecodingServices: never }>(root: string, name: string, schema: S) =>
   read(nodePath.join(root, name)).pipe(
     Effect.flatMap((raw) => {
-      const decoded = Schema.decodeUnknownResult(Schema.fromJsonString(schema), { errors: "all", onExcessProperty: "error" })(raw.toString("utf-8"));
+      const decoded = Schema.decodeResult(Schema.fromJsonString(schema), { errors: "all", onExcessProperty: "error" })(raw.toString("utf-8"));
       return Result.isFailure(decoded) ? Effect.fail(`${name} does not decode: ${issuesOf(decoded.failure)}`) : Effect.succeed<S["Type"]>(decoded.success);
     }),
   );

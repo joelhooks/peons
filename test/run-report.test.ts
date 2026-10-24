@@ -1,3 +1,4 @@
+// @effect-diagnostics unstableApiUsage:off -- effect/Arbitrary is the only property-test generator; this file is the boundary
 import { Schema } from "effect";
 import * as Arbitrary from "effect/Arbitrary";
 import { describe, expect, it } from "vitest";
@@ -11,7 +12,7 @@ import type { PeonRunResult, RunReport } from "../src/run-report.ts";
 import { DESK, bool, forAll, pick, reviewTemplate, routing } from "./support.ts";
 
 const requestFor = (workType: string, docs: Record<string, string>) =>
-  Schema.decodeUnknownSync(PeonRequest)({ base: null, desk: DESK, input: { docs, kind: "brief", text: "Count the fences." }, runId: "run-7", schema: "peons.request.v1", scope: [], target: { kind: "work-type", workType } });
+  Schema.decodeSync(PeonRequest)({ base: null, desk: DESK, input: { docs, kind: "brief", text: "Count the fences." }, runId: "run-7", schema: "peons.request.v1", scope: [], target: { kind: "work-type", workType } });
 
 const compiledFor = (workType: string, docs: Record<string, string>): Compiled => {
   const resolved = resolveRoute(routing, workType);

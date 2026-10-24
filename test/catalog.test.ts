@@ -35,7 +35,7 @@ const temp = () => mkdtempSync(nodePath.join(tmpdir(), "digest-"));
 describe("bin/digest.ts", () => {
   it("digests a pending warmup as no refs, the same as templateDigest", () => {
     const raw = readFileSync("templates/arrows-svg/v1/template.json", "utf-8");
-    const pending = { ...Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(raw), warmup: { note: "later", owner: "x", status: "pending" } };
+    const pending = { ...Schema.decodeSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(raw), warmup: { note: "later", owner: "x", status: "pending" } };
     const dir = temp();
     writeFileSync(nodePath.join(dir, "template.json"), JSON.stringify(pending));
     const node = Schema.decodeUnknownSync(TemplateNode)(pending);
