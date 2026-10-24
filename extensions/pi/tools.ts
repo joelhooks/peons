@@ -93,7 +93,7 @@ const refusedRecord = (request: Addressed, template: string, route: FrozenStep["
 export const submitOnce = (host: RunHostPort, compiled: Compiled, request: Addressed, refusedTemplate: string, route: FrozenStep["route"]) =>
   Effect.gen(function* submitOnceGen() {
     const existing = yield* host.inspect(compiled.runId).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.catchTag("UnknownRun", () => Effect.succeed(Option.none<RunReport>())),
     );
     if (Option.isSome(existing)) {return fromRunReport(existing.value, request);}
@@ -108,8 +108,10 @@ const hostFailure = (tool: string) => (failure: { readonly message: string }) =>
 
 const finish = (tool: string) => (effect: Effect.Effect<ToolOutput, Prompt | { readonly _tag: "HostFailure"; readonly message: string }>) =>
   effect.pipe(
-    Effect.catchTag("Prompt", (refused) => Effect.succeed(refusal(refused))),
-    Effect.catchTag("HostFailure", hostFailure(tool)),
+    Effect.catchTags({
+      HostFailure: hostFailure(tool),
+      Prompt: (refused) => Effect.succeed(refusal(refused)),
+    }),
   );
 
 const RUN_SHAPE = '{ workType: "<concept>" | peon: "<template>[@<version>]", brief: "<text>", docs?: { <slug>: "<text>" } | event: { name, data }, base?: { repo, sha }, scope?: ["<path>"], runId?: "<id>" }';
@@ -147,7 +149,7 @@ const claimOutcome = (claimed: string | undefined, actual: string) => {
 const outcomeIcon = { fail: "❌", pass: "✅", skip: "➖" } as const;
 
 const verdict = (name: string, actual: { sha256: string; bytes: number }, claimed: string | undefined): ToolOutput => {
-  const check = Schema.decodeUnknownSync(Check)({ detail: `sha256 ${actual.sha256} · ${actual.bytes} bytes${claimed === undefined ? " · no claimed sha256 to compare" : ""}`, name, outcome: claimOutcome(claimed, actual.sha256) });
+  const check = Schema.decodeSync(Check)({ detail: `sha256 ${actual.sha256} · ${actual.bytes} bytes${claimed === undefined ? " · no claimed sha256 to compare" : ""}`, name, outcome: claimOutcome(claimed, actual.sha256) });
   return { data: { check, evidence: actual }, isError: check.outcome === "fail", text: `${outcomeIcon[check.outcome]} ${name}: ${check.detail}` };
 };
 
@@ -163,7 +165,7 @@ const quoteCheckOf = (report: RunReport, writes: string, verdictName: keyof type
   const docs = Object.fromEntries(Object.entries(cites).flatMap(([cited, held]) => (report.docs[held] === undefined ? [] : [[cited, docText(report.docs[held])]])));
   const quotes = decoded.ok ? quotesOf(decoded.verdict) : [];
   const bad = decoded.ok ? verifyQuotes(decoded.verdict, docs) : [];
-  return Schema.decodeUnknownSync(Check)({
+  return Schema.decodeSync(Check)({
     detail: quoteDetail(decoded, writes, verdictName, bad, quotes),
     name: `verdict-quotes:${writes}`,
     outcome: decoded.ok && bad.length === 0 ? "pass" : "fail",
@@ -187,7 +189,7 @@ const decodeStored = (bytes: Uint8Array) => {
 type Targeted = { readonly resolved: Resolved | null; readonly loaded: LoadedTemplate | null } | { readonly refused: ToolOutput };
 
 // Which route or template a request names, or the refusal that says why none runs.
-const targetOf = (catalog: Catalog, request: typeof PeonRequest.Type, templatesAccepted: string): Targeted => {
+const targetOf = (catalog: Catalog, request: PeonRequest, templatesAccepted: string): Targeted => {
   const refusedAs = (template: string, route: FrozenStep["route"], refused: Prompt): Targeted => ({ refused: output(refusedRecord(request, template, route, refused)) });
   if (request.target.kind === "work-type") {
     const route = resolveRoute(catalog.routing, request.target.workType);

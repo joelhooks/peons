@@ -22,7 +22,7 @@ const RATES: Record<string, { input: number; output: number }> = {
   "arrow-2-telos": { input: 6, output: 30 },
 };
 
-export class QuiverRefusal extends Schema.TaggedError<QuiverRefusal>()("QuiverRefusal", {
+export class QuiverRefusal extends Schema.TaggedError<QuiverRefusal, { readonly brand: unique symbol }>()("QuiverRefusal", {
   detail: Schema.String,
   refusal: ArrowRefusal,
 }) {

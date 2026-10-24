@@ -1,3 +1,4 @@
+// @effect-diagnostics unstableApiUsage:off -- effect/Arbitrary is the only property-test generator; this file is the boundary
 // Shared test fixtures: fixture routing, catalog and think tables built here (the live routing.json
 // and catalog.json are read only by the seam tests), an in-memory Mischief host that keeps runs by
 // runId the way submitPlan does, in-memory files, and a property runner that returns the first
@@ -26,7 +27,7 @@ export const DESK = "agent-graph/desk";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 
-export const routing: RoutingTable = Schema.decodeUnknownSync(RoutingTable)({
+export const routing: RoutingTable = Schema.decodeSync(RoutingTable)({
   routes: {
     ask: { source: "test", specialist: { peon: "fix-ask@2" }, status: "provisional", why: "fixture ask" },
     review: { source: "test", specialist: { peon: "fix-review@1" }, status: "provisional", why: "fixture review" },

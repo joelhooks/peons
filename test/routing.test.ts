@@ -1,3 +1,4 @@
+// @effect-diagnostics unstableApiUsage:off -- effect/Arbitrary is the only property-test generator; this file is the boundary
 import { readFileSync } from "node:fs";
 
 import { Effect, Schema } from "effect";
@@ -20,7 +21,7 @@ describe("work-type routing", () => {
       expect(resolved, concept).not.toBeInstanceOf(RouteRefused);
       if (resolved instanceof RouteRefused) {continue;}
       expect(resolved.concept).toBe(ancestors(concept).find((candidate) => Object.hasOwn(table.routes, candidate)));
-      expect(Schema.decodeUnknownSync(RecordRoute)(routeRecord(resolved))).toEqual(routeRecord(resolved));
+      expect(Schema.decodeSync(RecordRoute)(routeRecord(resolved))).toEqual(routeRecord(resolved));
     }
   });
 

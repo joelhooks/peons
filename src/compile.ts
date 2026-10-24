@@ -24,7 +24,7 @@ import { VerdictName } from "./verdicts.ts";
 // ---------------------------------------------------------------------------------------------
 // The 4-line prompt every refusal uses.
 
-export class Prompt extends Schema.TaggedError<Prompt>()("Prompt", {
+export class Prompt extends Schema.TaggedError<Prompt, { readonly brand: unique symbol }>()("Prompt", {
   accepted: Schema.String,
   debug: Schema.String,
   did: Schema.String,
