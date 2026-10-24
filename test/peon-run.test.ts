@@ -1,4 +1,3 @@
-// @effect-diagnostics unstableApiUsage:off -- effect/Arbitrary is the only property-test generator; this file is the boundary
 import { Effect, Exit, Schema } from "effect";
 import * as Arbitrary from "effect/Arbitrary";
 import { describe, expect, it } from "vitest";

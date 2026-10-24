@@ -18,7 +18,7 @@
     "check:pi": "node extensions/pi/check-types.ts",
     "digest": "node bin/digest.ts",
     "lint": "oxlint src bin extensions test",
-    "typecheck": "effect-tsrs diagnostics --project tsconfig.json --strict",
+    "typecheck": "effect-tsrs diagnostics --project tsconfig.json --strict && effect-tsrs diagnostics --project tsconfig.src.json --strict",
     "typecheck:tsc": "tsc --noEmit",
     "typecheck:fast": "tsrs --noEmit -p tsconfig.json"
   },
