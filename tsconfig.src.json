@@ -1,0 +1,8 @@
+{
+  // src and bin without the test-only effect/Arbitrary allowance in tsconfig.json.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "plugins": [{ "name": "@effect/language-service", "allowedUnstableApis": [] }]
+  },
+  "include": ["src", "bin"]
+}

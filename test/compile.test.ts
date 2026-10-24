@@ -1,4 +1,3 @@
-// @effect-diagnostics unstableApiUsage:off -- effect/Arbitrary is the only property-test generator; this file is the boundary
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

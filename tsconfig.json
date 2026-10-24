@@ -1,5 +1,7 @@
 {
   "compilerOptions": {
+    // Property tests use effect/Arbitrary, which Effect marks unstable; we use it on purpose. tsconfig.src.json drops this allowance so src and bin stay clean.
+    "plugins": [{ "name": "@effect/language-service", "allowedUnstableApis": ["effect/Arbitrary"] }],
     "target": "es2024",
     "module": "nodenext",
     "moduleResolution": "nodenext",

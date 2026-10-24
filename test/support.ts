@@ -1,4 +1,3 @@
-// @effect-diagnostics unstableApiUsage:off -- effect/Arbitrary is the only property-test generator; this file is the boundary
 // Shared test fixtures: fixture routing, catalog and think tables built here (the live routing.json
 // and catalog.json are read only by the seam tests), an in-memory Mischief host that keeps runs by
 // runId the way submitPlan does, in-memory files, and a property runner that returns the first
