@@ -1,0 +1,8 @@
+# Pre-commit fence: lint plus effect-tsrs, then the tests. Install: pnpm exec lefthook install (also via prepare).
+pre-commit:
+  parallel: false
+  commands:
+    check:
+      run: pnpm run check
+    test:
+      run: pnpm exec vitest run --maxWorkers=4
