@@ -25,7 +25,9 @@
     "typecheck:fast": "tsrs --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "effect": "4.0.5"
+    "@xstate/effect": "1.0.0-alpha.9",
+    "effect": "4.0.5",
+    "xstate": "6.0.0-alpha.70"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
