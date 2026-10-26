@@ -156,8 +156,11 @@ export default function peons(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", () => {
-    const active = pi.getActiveTools();
-    const inactive = PEON_TOOLS.filter((name) => !active.includes(name));
-    if (inactive.length > 0) pi.setActiveTools([...active, ...inactive]);
+    const active: readonly string[] = pi.getActiveTools();
+    const on = new Set<string>(active);
+    const inactive = PEON_TOOLS.filter((name) => !on.has(name));
+    if (inactive.length > 0) {
+      pi.setActiveTools([...active, ...inactive]);
+    }
   });
 }
