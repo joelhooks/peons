@@ -19,6 +19,8 @@ import type { RunHostPort } from "./host.ts";
 import { makeTools } from "./tools.ts";
 import type { Files, ToolOutput } from "./tools.ts";
 
+const PEON_TOOLS = ["peon_catalog", "peon_run", "peon_status", "peon_answer", "peon_verify", "workflow_define", "workflow_run"];
+
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const DEBUG = "read extensions/pi/index.ts in joelhooks/peons";
 
@@ -151,5 +153,14 @@ export default function peons(pi: ExtensionAPI) {
     label: "Workflow run",
     name: "workflow_run",
     parameters: Type.Object({ runId: Type.String(), workflow: Type.String({ description: "The path workflow_define returned" }), ...Input }),
+  });
+
+  pi.on("session_start", () => {
+    const active: readonly string[] = pi.getActiveTools();
+    const on = new Set<string>(active);
+    const inactive = PEON_TOOLS.filter((name) => !on.has(name));
+    if (inactive.length > 0) {
+      pi.setActiveTools([...active, ...inactive]);
+    }
   });
 }
