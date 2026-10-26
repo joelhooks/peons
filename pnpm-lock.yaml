@@ -8,9 +8,15 @@ importers:
 
   .:
     dependencies:
+      '@xstate/effect':
+        specifier: 1.0.0-alpha.9
+        version: 1.0.0-alpha.9(effect@4.0.5)(xstate@6.0.0-alpha.70)
       effect:
         specifier: 4.0.5
         version: 4.0.5
+      xstate:
+        specifier: 6.0.0-alpha.70
+        version: 6.0.0-alpha.70
     devDependencies:
       '@types/node':
         specifier: 24.10.1
@@ -400,6 +406,12 @@ packages:
 
   '@vitest/spy@5.0.3':
     resolution: {integrity: sha512-XhFysQTB8AZ+P4gMi+Lpo99vg2AZi0qKpaB9yXQl37+CaMEAPO3iH/wGVnSyL5MPERiLezpqTVtrR6UZH5GCXg==}
+
+  '@xstate/effect@1.0.0-alpha.9':
+    resolution: {integrity: sha512-/j88zmjdhbHpBx5klhHIH+Tj8CpT+fb5x0syOKaZIFymPDShgOKwRVtCkz+t1KrX5p4qV4XBEQOCSsmqYnfgqg==}
+    peerDependencies:
+      effect: ^4.0.0
+      xstate: ^6.0.0-alpha.70
 
   '@yielded/effect-tsrs-darwin-arm64@0.2.0':
     resolution: {integrity: sha512-WxY+nUP25AxGWVB1EgTO2TS5yN9zZA/3orVMh0SuJ4CuIDZ/xXJu5k9iMSrYixuj6QBva+iQsCbrMKxxUo3zgg==}
@@ -1053,6 +1065,10 @@ packages:
     resolution: {integrity: sha512-6OLRNZqRntVGBm26ghZ5eZhCuWWyOkRCSn8XsOIuq5stpCE/tjLbdozd93naILZig0lmD8ANfRwnhn0DLeXGlg==}
     engines: {node: '>=20'}
 
+  xstate@6.0.0-alpha.70:
+    resolution: {integrity: sha512-TSFfXYaTNz+ylEpguNsu0L5vDy8cjHRXAqpZBKQnJI++Jm61Vb41TAg1HzeEbC+Mnq9XelKs2dQNOizTwcnssQ==}
+    hasBin: true
+
   yaml@2.9.1:
     resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
     engines: {node: '>= 14.6'}
@@ -1281,6 +1297,11 @@ snapshots:
       vite: 8.3.4(@types/node@24.10.1)(yaml@2.9.1)
 
   '@vitest/spy@5.0.3': {}
+
+  '@xstate/effect@1.0.0-alpha.9(effect@4.0.5)(xstate@6.0.0-alpha.70)':
+    dependencies:
+      effect: 4.0.5
+      xstate: 6.0.0-alpha.70
 
   '@yielded/effect-tsrs-darwin-arm64@0.2.0':
     optional: true
@@ -1822,6 +1843,8 @@ snapshots:
     dependencies:
       ansi-styles: 6.2.3
       string-width: 8.3.0
+
+  xstate@6.0.0-alpha.70: {}
 
   yaml@2.9.1: {}
 
