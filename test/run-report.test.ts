@@ -76,19 +76,23 @@ const expected = (s: Scenario): string => {
 
 const kind = (result: PeonRunResult) => ("type" in result ? result.type : result.status);
 
-const mapsExactly = async (map: (report: RunReport) => PeonRunResult) =>
-  await forAll(
-    Scenario,
-    (s) => {
-      const report = reportOf(s);
-      const result = map(report);
-      const decodes = Schema.is(RunResult)(result) && (!("type" in result) || Schema.is(PeonRecord)(result));
-      const {writes} = compiledOf(s).frozen;
-      const done = !("type" in result) || result.type !== "peon.done" || report.docs[writes] !== undefined;
-      return decodes && done && kind(result) === expected(s);
-    },
-    600,
-  );
+// Scenarios the planted bug cannot hide from: a done run with no artifact, in both shapes. Random
+// generation reaches them only about once in a hundred draws, so they are always checked.
+const witnesses: readonly Scenario[] = (["profile", "think"] as const).map((shape) => ({ artifact: "none", awaiting: false, failure: "none", message: false, question: false, rejected: false, shape, status: "done", thinking: false }));
+
+const mapsExactly = async (map: (report: RunReport) => PeonRunResult) => {
+  const holds = (s: Scenario): boolean => {
+    const report = reportOf(s);
+    const result = map(report);
+    const decodes = Schema.is(RunResult)(result) && (!("type" in result) || Schema.is(PeonRecord)(result));
+    const {writes} = compiledOf(s).frozen;
+    const done = !("type" in result) || result.type !== "peon.done" || report.docs[writes] !== undefined;
+    return decodes && done && kind(result) === expected(s);
+  };
+  const missed = witnesses.find((s) => !holds(s));
+  if (missed !== undefined) {return `counterexample (witness): ${JSON.stringify(missed)}`;}
+  return await forAll(Scenario, holds, 600);
+};
 
 const planted = (report: RunReport) => fromRunReport(report.status === "done" ? { ...report, docs: { artifact: "", review: goodVerdict, ...report.docs } } : report, request);
 
