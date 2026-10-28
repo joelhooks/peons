@@ -216,6 +216,23 @@ const valueOf = (doc: Schema.Json): Schema.Json | Prompt => {
 };
 const Item = Schema.Struct({ id: Schema.String.check(Schema.isMinLength(1)) });
 const Verdict = Schema.Struct({ items: Schema.Array(Schema.Struct({ id: Schema.String, verdict: Schema.Json })) });
+// A done host run is not a successful map attempt until its verdict covers its batch exactly.
+// Share this decoder with gather so retry eligibility and the final guard cannot drift apart.
+const batchVerdict = (batch: Schema.Json, raw: Schema.Json | undefined, path: string): typeof Verdict.Type | Prompt => {
+  if (raw === undefined) {return compositionRefused(`leaf ${path} has no verdict doc`);}
+  const value = valueOf(raw);
+  if (value instanceof Prompt) {return value;}
+  const expectedBatch = Schema.decodeUnknownResult(Schema.Array(Item))(batch);
+  const decoded = Schema.decodeUnknownResult(Verdict)(value);
+  if (Result.isFailure(expectedBatch) || Result.isFailure(decoded)) {return compositionRefused(`leaf ${path} needs a batch of {id} items and a verdict {items:[{id,verdict}]}`);}
+  const expected = expectedBatch.success.map(({ id }) => id);
+  const actual = decoded.success.items.map(({ id }) => id);
+  if (new Set(expected).size !== expected.length || new Set(actual).size !== actual.length || canonical(expected.toSorted()) !== canonical(actual.toSorted())) {return compositionRefused(`leaf ${path} verdict ids do not match its batch 1:1`);}
+  return decoded.success;
+};
+const invalidBatchVerdict = (task: BoundTask, batch: Schema.Json | null, report: RunReport, path: string): boolean =>
+  report.status === "done" && batch !== null && batchVerdict(batch, report.docs[task.seed.frozen.writes], path) instanceof Prompt;
+
 type StepStatus = Reconciled["steps"][string];
 const metrics = (leaf: Leaf, runs: Observed["runs"]): Schema.Json => {
   let cost: number | null = 0;
@@ -268,7 +285,7 @@ const settleLeaf = (definition: DefinedComposition, task: BoundTask, path: strin
     attempts.push(next);
     const report = runs[runId];
     if (report === undefined) {return { attempts, latest: next, path, report, status: "missing" };}
-    if (failed(report) || invalidVerdict(task, report)) {
+    if (failed(report) || invalidVerdict(task, report) || invalidBatchVerdict(task, batch, report, path)) {
       if (attempt < cap) {continue;}
       return { attempts, latest: next, path, report, status: "failed" };
     }
@@ -294,17 +311,9 @@ export const gather = (leaves: readonly Leaf[]): Schema.Json | Prompt => {
   for (const leaf of leaves) {
     const {report} = leaf;
     if (leaf.status !== "done" || report === undefined || leaf.latest.batch === null) {return compositionRefused(`gather leaf ${leaf.path} is not done with a batch`);}
-    const batch = Schema.decodeUnknownResult(Schema.Array(Item))(leaf.latest.batch);
-    const raw = report.docs[leaf.latest.compiled.frozen.writes];
-    if (raw === undefined) {return compositionRefused(`leaf ${leaf.path} has no verdict doc`);}
-    const value = valueOf(raw);
-    if (value instanceof Prompt) {return value;}
-    const decoded = Schema.decodeUnknownResult(Verdict)(value);
-    if (Result.isFailure(batch) || Result.isFailure(decoded)) {return compositionRefused(`leaf ${leaf.path} needs a batch of {id} items and a verdict {items:[{id,verdict}]}`);}
-    const expected = batch.success.map(({ id }) => id);
-    const actual = decoded.success.items.map(({ id }) => id);
-    if (new Set(expected).size !== expected.length || new Set(actual).size !== actual.length || canonical(expected.toSorted()) !== canonical(actual.toSorted())) {return compositionRefused(`leaf ${leaf.path} verdict ids do not match its batch 1:1`);}
-    for (const item of decoded.success.items) {
+    const decoded = batchVerdict(leaf.latest.batch, report.docs[leaf.latest.compiled.frozen.writes], leaf.path);
+    if (decoded instanceof Prompt) {return decoded;}
+    for (const item of decoded.items) {
       if (seen.has(item.id)) {return compositionRefused(`gather repeats item ${item.id} across batches`);}
       seen.add(item.id);
       items.push({ ...item, leaf: leaf.path });

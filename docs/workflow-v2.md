@@ -32,7 +32,7 @@ const workflow = {
 };
 ```
 
-Use a work type whose output follows the batch verdict contract. A template with a different verdict schema is not a batch-review template. Gather refuses incompatible output rather than guessing.
+Use a work type whose output follows the batch verdict contract. A template with a different verdict schema is not a batch-review template. A done map attempt with malformed output or missing, duplicate or foreign item ids counts as failed. Reconcile retries it under the attempt cap and ends the leaf failed at the cap. Gather repeats the same decoder as a final guard rather than guessing.
 
 Step kinds:
 
@@ -42,6 +42,8 @@ Step kinds:
 - `gather`: `from: "earlier-map-id"`, `writes: "doc-name"`. Runs as code with no submit. Each successful leaf must return JSON `{ items: [{ id, verdict }] }`, where `verdict` is a JSON value. Gather checks the ids against that leaf's batch exactly once, with no duplicates, omissions or foreign ids.
 
 Named inputs use `{ from: "<earlier-step>.<output-doc>" }`. External docs use `input.<name>`; `input.brief` is the brief text. A map task can read its batch with `{ from: "batch" }`. References must name an earlier step's actual output doc. Profile peons write `artifact`; templates write their declared doc; v1 workflow leaves write their final step's doc. A map's named output is the array of leaf output docs. Gather writes its declared doc.
+
+A v2 composition can contain peons and v1 workflow leaves, not another v2 composition. V2-in-v2 nesting belongs to slice 2 together with bundles.
 
 A v1 workflow receives its selected docs as `{ text, docs }` in its existing `peon-input` doc, exactly as v1 `workflow_run` does. It is not flattened into v2 steps. To chain a gather into a v1 workflow, add a `workflow` step with an input such as `docs: { verdicts: { from: "collect.verdicts" } }`.
 
@@ -80,7 +82,7 @@ waiting -> missing -> active -> done
                        failed -> dependent steps failed
 ```
 
-An absent leaf starts at `a1`. A failed, aborted, stuck, envelope-exceeded or amendment-refused attempt advances to `a(n+1)` while `n < retryCap`. A v1 workflow ending in `rejected` also counts as failed. Active and blocked attempts never resubmit. At the cap, the leaf remains failed and reconcile returns no submission for it. Independent ready leaves can still proceed when another branch fails.
+An absent leaf starts at `a1`. A done map attempt whose verdict fails JSON decoding or batch 1:1 membership also follows the failure transition; a missing item cannot leave the composition refusing forever. A failed, aborted, stuck, envelope-exceeded or amendment-refused attempt advances to `a(n+1)` while `n < retryCap`. A v1 workflow ending in `rejected` also counts as failed. Active and blocked attempts never resubmit. At the cap, the leaf remains failed and reconcile returns no submission for it. Independent ready leaves can still proceed when another branch fails.
 
 Each attempt id hashes the definition digest, step path, selected input digests (including the batch), and all bound profiles. The desk-scoped `mischiefRunId` is suffixed with `-a<n>`. The actual host id stays within 64 lowercase letters, digits and hyphens. Changed input cannot reuse a previous verdict. Each attempt's frozen record contains its bound profiles.
 
@@ -92,12 +94,13 @@ V2 results expose actual host run ids. Re-call `workflow_run` to observe and adv
 
 ## Verification
 
-`test/workflow-v2.test.ts` runs two generated properties against `fakeHost()`: 100 nested workflow/crash/retry/input-replay schedules and 100 mixed per-leaf failure schedules. It also covers partial submission recovery, manifest-before-submit ordering, input limits, 64-leaf bounds, exact gather membership, all-attempt usage, gate answers, invalid template verdicts and empty maps. No live host submits are part of these tests.
+`test/workflow-v2.test.ts` runs three generated properties against `fakeHost()`: 100 nested workflow/crash/retry/input-replay schedules, 100 mixed per-leaf failure schedules, and 100 omitted-item verdict schedules that recover below the cap or end failed at the cap without refusing. It also covers partial submission recovery, manifest-before-submit ordering, input limits, 64-leaf bounds, exact gather membership, all-attempt usage, gate answers, invalid template verdicts and empty maps. No live host submits are part of these tests.
 
 Mutation receipts from scratch copies, using `vitest run test/workflow-v2.test.ts --maxWorkers=4 -t 'generated nested workflows'`:
 
 - **Plant A:** replaced the identity's `inputDigests` with `null`. The property failed (exit 1), shrinking to one batch, one nested step, cap 1 and no failures. Changing the input reused the old verdict instead of starting a new attempt.
 - **Plant B:** changed the failed-attempt branch to return that same attempt as missing. The property failed (exit 1) with `Error: duplicate attempt`; retries could not converge without resubmitting an existing id.
 - Reverted both plants in their scratch copies. The same property then passed in each copy (exit 0), and both restored sources matched the working source byte-for-byte. Neither mutation was applied to the working checkout.
+- **Follow-up plant C:** removed the map-verdict check from `settleLeaf`, leaving validation in gather only. The generated omitted-item verdict property failed with exit 1 on the old permanent-refusal path. Restoring the check made the same property pass. This proves that gather-only validation does not satisfy retry liveness.
 
 Bundles, imports, portable model binding, extra host adapters and `peon_swarm` sugar are outside this slice.

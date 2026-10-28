@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { FROZEN_DOC, INPUT_DOC, Prompt, canonical } from "../src/compile.ts";
 import { defineWorkflow } from "../src/workflow.ts";
-import { attemptId, decodeComposition, defineComposition, reconcile } from "../src/workflow-v2.ts";
+import { attemptId, decodeComposition, defineComposition, gather, reconcile } from "../src/workflow-v2.ts";
 import type { Attempt, DefinedComposition, Reconciled } from "../src/workflow-v2.ts";
 import { DESK, catalog, fakeHost, forAll, int, memoryFiles, run, toolsWith } from "./support.ts";
 
@@ -43,10 +43,10 @@ const submit = async (fake: ReturnType<typeof fakeHost>, attempt: Attempt) => aw
 
 // The scheduler deliberately forgets its local variables between ticks. The host's run records are
 // the only durable progress. Skipping a prefix models a caller crashing before/after a submission.
-const drive = async (defined: DefinedComposition, fake: ReturnType<typeof fakeHost>, batches: Schema.Json, failures: number, crashes: readonly number[]): Promise<Reconciled> => {
+const drive = async (defined: DefinedComposition, fake: ReturnType<typeof fakeHost>, batches: Schema.Json, failures: number, crashes: readonly number[], fault: "host" | "omission" = "host"): Promise<Reconciled> => {
   for (let tick = 0; tick < 90; tick += 1) {
     const state = stateOf(defined, fake, batches);
-    if (state.status !== "running") {return state;}
+    if (state.status !== "running" && state.leaves.every(({ status }) => status === "done" || status === "failed")) {return state;}
     const prefix = tick % 3 === 2 ? state.submit.length : (crashes[tick % crashes.length] ?? 0) % (state.submit.length + 1);
     // Each tick observes the preceding tick; running ticks concurrently would erase the crash model.
     // oxlint-disable-next-line no-await-in-loop
@@ -61,7 +61,13 @@ const drive = async (defined: DefinedComposition, fake: ReturnType<typeof fakeHo
       const report = fake.runs.get(attempt.runId)?.report;
       if (report === undefined) {throw new Error("active leaf missing on host");}
       const fails = attempt.attempt <= failures;
-      fake.patch(attempt.runId, { docs: { ...report.docs, [attempt.compiled.frozen.writes]: verdictOf(attempt, batches) }, listCostUsd: 0.1, status: fails ? "failed" : "done", thinking: { line: "fixture", tokens: { cacheRead: 1, input: 2, output: 3 } }, value: fails ? "work" : "done" });
+      let verdict = verdictOf(attempt, batches);
+      if (fault === "omission" && fails && attempt.batch !== null) {
+        const { items } = Schema.decodeUnknownSync(Schema.Struct({ items: Schema.Array(Schema.Json) }))(verdict);
+        verdict = { items: items.slice(1) };
+      }
+      const hostFailed = fault === "host" && fails;
+      fake.patch(attempt.runId, { docs: { ...report.docs, [attempt.compiled.frozen.writes]: verdict }, listCostUsd: 0.1, status: hostFailed ? "failed" : "done", thinking: { line: "fixture", tokens: { cacheRead: 1, input: 2, output: 3 } }, value: hostFailed ? "work" : "done" });
     }
   }
   throw new Error("did not converge");
@@ -92,6 +98,22 @@ describe("composed workflow reconcile", () => {
         if (gathered.items.length !== leaves || gathered.items.some(({ verdict }) => verdict !== 1)) {return false;}
       }
       return fake.calls.submit.length === new Set(fake.calls.submit).size;
+    }, 100)).toBeUndefined();
+  }, 120_000);
+
+  it("generated omitted-item verdict schedules retry done map attempts and converge or fail at the cap without refusing", async () => {
+    expect(await forAll(Schedule, async ({ cap, crashes, failures, leaves, maps, nestedSteps }) => {
+      const defined = definition(cap, nestedSteps, maps);
+      const fake = fakeHost();
+      const batches = batchesOf(leaves);
+      const settled = await drive(defined, fake, batches, failures, crashes, "omission");
+      const expected = failures < cap ? "done" : "failed";
+      if (settled.status !== expected || settled.submit.length !== 0) {return false;}
+      const mapLeaves = settled.leaves.filter(({ latest }) => latest.batch !== null);
+      if (mapLeaves.length !== leaves * maps) {return false;}
+      if (mapLeaves.some(({ latest, status }) => latest.attempt !== Math.min(failures + 1, cap) || status !== expected)) {return false;}
+      const again = stateOf(defined, fake, batches);
+      return again.status === expected && again.submit.length === 0 && fake.calls.submit.length === new Set(fake.calls.submit).size;
     }, 100)).toBeUndefined();
   }, 120_000);
 
@@ -194,7 +216,7 @@ describe("composed workflow reconcile", () => {
     expect(canonical(unknown.docs["gather0.verdicts"])).toContain('"tokens":null');
   });
 
-  it.each(["missing", "duplicate", "foreign", "malformed"])("refuses a %s verdict instead of reporting success", async (fault) => {
+  it.each(["missing", "duplicate", "foreign", "malformed"])("retries a %s map verdict while gather retains its final guard", async (fault) => {
     const defined = definition();
     const fake = fakeHost();
     const settled = await drive(defined, fake, batchesOf(), 0, [4]);
@@ -203,7 +225,12 @@ describe("composed workflow reconcile", () => {
     const id = "item0";
     const bad = { duplicate: { items: [{ id, verdict: true }, { id, verdict: true }] }, foreign: { items: [{ id: "foreign", verdict: true }] }, malformed: "not-json", missing: { items: [] } }[fault];
     fake.patch(leaf.latest.runId, { docs: { ...leaf.report.docs, [leaf.latest.compiled.frozen.writes]: bad ?? null } });
-    expect(reconcile(defined, observed(fake, batchesOf()))).toBeInstanceOf(Prompt);
+    const retry = stateOf(defined, fake, batchesOf());
+    expect(retry.status).toBe("running");
+    expect(retry.submit).toHaveLength(1);
+    expect(retry.submit[0]?.attempt).toBe(2);
+    const badReport = fake.runs.get(leaf.latest.runId)?.report;
+    expect(gather([{ ...leaf, report: badReport }])).toBeInstanceOf(Prompt);
   });
 
   it("invalid declared template verdicts retry and fail at the cap instead of chaining stale or malformed output", async () => {
