@@ -51,6 +51,8 @@ The `pi` key loads `extensions/pi`. A desk runs a peon in one call, or builds a 
 | `workflow_define` | Compiles a `peons.workflow.v1` definition into one Mischief plan and writes `.peons/workflows/<id>/v<version>.json`. A step is `{ id, kind: "peon", template \| workType, input: { text, from?, docs? }, gate?: "verify" \| "owner-approve", check?, failurePolicy?: "stop" }`. A `{profile}` step lists what it reads in `from`; a templated step maps each declared template input to `"input"` or an earlier step id in `docs`, and its docs are renamed per step so two steps on one template never collide. Routes freeze at define time. A version, once written, never changes. |
 | `workflow_run` | `{ workflow: <path>, runId, brief \| event }`. Submits the stored plan as one run, idempotent on `runId`. Answer an owner-approve gate with `peon_answer`. |
 
+`workflow_define` also accepts [composed v2 workflows](docs/workflow-v2.md): peon and digest-pinned v1 workflow leaves, maps over batches, and code-only gather. V2 `workflow_run` omits `runId`; it reconciles observed attempts, writes a manifest before submitting, and starts only missing attempts. Re-call after leaves settle. Input digests and bound profiles join each attempt id, and failures stop retrying at the attempt cap (default 2). `peon_swarm` is unchanged.
+
 The run tools need three environment variables:
 
 - `MISCHIEF_HOST`: the worker origin, like `http://host:port/`.
@@ -78,7 +80,8 @@ bin/peon-compile.ts       request in, submitPlan body or refusal out
 catalog.json              ranked generic peons (peons.catalog.v1)
 src/compile.ts            {profile} route → one-think Mischief plan; workflows; the derived Mischief plan schema and checks
 src/run-report.ts         Mischief run report → contract handle or record
-src/workflow.ts           workflow definition → one Mischief plan
+src/workflow.ts           v1 workflow definition → one Mischief plan
+src/workflow-v2.ts        composed workflows → pure reconcile, map/gather, attempt ids
 extensions/pi/            the Pi tools, the run-host port, the live signed adapter and check:pi
 templates/<name>/v<n>/    template.json, warmup/, references/
 ```

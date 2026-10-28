@@ -42,6 +42,8 @@ export const RunReport = Schema.Struct({
   awaiting: Schema.optionalKey(Schema.Array(Awaiting)),
   docs: Schema.Record(Schema.String, Schema.Json),
   failures: Schema.optionalKey(Schema.Array(Schema.Struct({ key: Schema.String, reason: Schema.String }))),
+  // Optional host-reported list cost. Absence means unknown, never zero dollars.
+  listCostUsd: Schema.optionalKey(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
   planId: Schema.String,
   planVersion: Count,
   question: Schema.optionalKey(Question),

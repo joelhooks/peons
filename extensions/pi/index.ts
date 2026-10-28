@@ -156,19 +156,19 @@ export default function peons(pi: ExtensionAPI) {
   pi.registerTool({
     annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false, readOnlyHint: false },
     description:
-      'Compile a workflow of peon steps into one Mischief plan and write it as a versioned doc under .peons/workflows/<id>/v<version>.json. Definition: { schema: "peons.workflow.v1", id, version, desk, steps: [{ id, kind: "peon", template | workType, input: { text, from?: ["input" | earlier step id] for a {profile} step, docs?: { <template input>: "input" | earlier step id } for a templated step }, gate?: "verify" | "owner-approve", check?, failurePolicy?: "stop" }] }. Routes freeze now.',
+      'Compile a workflow of peon steps into one Mischief plan and write it as a versioned doc under .peons/workflows/<id>/v<version>.json. Definition: { schema: "peons.workflow.v1", id, version, desk, steps: [{ id, kind: "peon", template | workType, input: { text, from?: ["input" | earlier step id] for a {profile} step, docs?: { <template input>: "input" | earlier step id } for a templated step }, gate?: "verify" | "owner-approve", check?, failurePolicy?: "stop" }] }. Routes freeze now. Also accepts peons.workflow.v2 compositions with peon, digest-pinned v1 workflow, map and gather steps; see docs/workflow-v2.md. V2 writes a content-addressed definition.',
     execute: execute("workflow_define"),
     label: "Workflow define",
     name: "workflow_define",
-    parameters: Type.Object({ workflow: Type.Unknown({ description: "The peons.workflow.v1 definition" }) }),
+    parameters: Type.Object({ workflow: Type.Unknown({ description: "A peons.workflow.v1 or peons.workflow.v2 definition" }) }),
   });
   pi.registerTool({
     annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true, readOnlyHint: false },
-    description: "Submit a defined workflow as one Mischief run with a brief or an event. Idempotent on runId. Watch it with peon_status; answer owner-approve gates with peon_answer.",
+    description: "V1: submit one Mischief plan, idempotent on runId; watch with peon_status. V2: omit runId; reconcile the composition, submit only missing attempts, and re-call with identical input after leaves settle. Each v1 workflow leaf stays one plan with its gates intact. V2 writes a manifest before submitting; no background watcher starts.",
     execute: execute("workflow_run"),
     label: "Workflow run",
     name: "workflow_run",
-    parameters: Type.Object({ runId: Type.String(), workflow: Type.String({ description: "The path workflow_define returned" }), ...Input }),
+    parameters: Type.Object({ runId: Type.Optional(Type.String({ description: "Required for v1; omit for v2 (attempt ids are content-derived)" })), workflow: Type.String({ description: "The path workflow_define returned" }), ...Input }),
   });
 
   pi.on("session_start", () => {
