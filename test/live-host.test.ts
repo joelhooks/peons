@@ -46,9 +46,14 @@ describe("live run host", () => {
     expect(await Effect.runPromise(host.inspect("run-abc"))).toMatchObject({ runId: "run-abc", status: "running" });
     await Effect.runPromise(host.deliver({ body: "yes", replyTo: "run-abc/work#1", runId: "run-abc" }));
     await Effect.runPromise(host.answer("run-abc", "pass"));
+    await Effect.runPromise(host.abort("run-abc", "replacement-a2", "superseded"));
     expect(leases).toBe(1);
-    expect(seen.map(({ url }) => url)).toEqual(["http://mischief.example:28000/inspectRun", "http://mischief.example:28000/deliverReply", "http://mischief.example:28000/answerRun"]);
+    expect(seen.map(({ url }) => url)).toEqual(["http://mischief.example:28000/inspectRun", "http://mischief.example:28000/deliverReply", "http://mischief.example:28000/answerRun", "http://mischief.example:28000/abortRun"]);
     expect(JSON.parse(bodyText(seen[2]?.init))).toEqual({ reply: "pass", runId: "run-abc" });
+    expect(JSON.parse(bodyText(seen[3]?.init))).toEqual({ reason: "superseded", runId: "run-abc", supersededBy: "replacement-a2" });
+    const abortToken = new Headers(seen[3]?.init?.headers).get("authorization")?.split(".")[1] ?? "";
+    expect(JSON.parse(fromB64(abortToken).toString())).toMatchObject({ lxm: "sh.mschf.mischief.abortRun" });
+    expect(seen[3]?.init?.method).toBe("POST");
     const headers = new Headers(seen[0]?.init?.headers);
     const [header, payload, signature] = (headers.get("authorization") ?? "").replace(/^Bearer /u, "").split(".");
     expect(JSON.parse(fromB64(header ?? "").toString())).toEqual({ alg: "ES256", kid: "#atproto", typ: "JWT" });
@@ -64,6 +69,8 @@ describe("live run host", () => {
     const { text } = await identity();
     const host = liveRunHost({ audience: "aud", endpoint: "http://m.example/", fetch: async () => await jsonResponse({ _tag: "UnknownRun", runId: "run-x" }, 422), signer: leasedSigner("n", () => Effect.succeed(text)) });
     const exit = await Effect.runPromiseExit(host.inspect("run-x"));
+    const abortUnknown = await Effect.runPromiseExit(host.abort("run-x", undefined, "cap"));
+    expect(Exit.isFailure(abortUnknown) && JSON.stringify(abortUnknown.cause)).toContain("UnknownRun");
     expect(Exit.isFailure(exit) && JSON.stringify(exit.cause)).toContain("UnknownRun");
     const declared = (body: unknown) => liveRunHost({ audience: "aud", endpoint: "http://m.example/", fetch: async () => await jsonResponse(body, 422), signer: leasedSigner("n", () => Effect.succeed(text)) });
     const refused = await Effect.runPromiseExit(declared({ _tag: "PlanRefused", errors: ["peon: needs on.done"] }).submit("run-x", { defaults: { agent: {} }, envelope: { maxAgents: 1, maxDepth: 1, maxSteps: 2, maxThinking: "low", models: ["sol"], names: [], thresholds: { judge: 0.8 } }, id: "run-x", machine: { id: "run-x", initial: "done", states: { done: { type: "final" } } } }, {}));
