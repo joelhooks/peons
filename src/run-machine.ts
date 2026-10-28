@@ -7,7 +7,7 @@
 import { setupEffect } from "@xstate/effect";
 import { Schema } from "effect";
 
-import { RunReport, decodeVerdict, frozenOf } from "./run-report.ts";
+import { RunReport, decodeVerdict, frozenOf, verdictDocs } from "./run-report.ts";
 
 const Addressed = Schema.Struct({ desk: Schema.String, runId: Schema.String });
 const Inspect = Schema.Struct({ report: RunReport, request: Addressed });
@@ -22,7 +22,7 @@ const observed = ({ report, request }: Inspect) => {
   if (final === undefined) {return { target: "refused" } as const;}
   if (report.status === "done") {
     const doc = report.docs[frozen.writes];
-    if (report.value === "rejected" || doc === undefined || (final.verdict !== null && !decodeVerdict(final.verdict, doc).ok)) {
+    if (report.value === "rejected" || doc === undefined || (final.verdict !== null && !decodeVerdict(final.verdict, doc, verdictDocs(final, report.docs)).ok)) {
       return { target: "failed" } as const;
     }
     return { target: "done" } as const;
