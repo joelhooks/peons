@@ -11,7 +11,7 @@ import nodePath from "node:path";
 import { Effect, Option, Result, Schema } from "effect";
 
 import { PeonRequest, Check } from "../../src/contract.ts";
-import { FROZEN_DOC, Prompt, canonical, compileRun, findThink, issuesOf, mischiefRunId, nameOf, prompt, sha256, thinkNames } from "../../src/compile.ts";
+import { FROZEN_DOC, GATEWAY_MODELS, Prompt, canonical, compileRun, findThink, issuesOf, mischiefRunId, nameOf, prompt, sha256, thinkNames } from "../../src/compile.ts";
 import type { Compiled, FrozenStep } from "../../src/compile.ts";
 import { RouteRefused, resolveRoute } from "../../src/routing.ts";
 import type { Resolved } from "../../src/routing.ts";
@@ -44,6 +44,9 @@ export interface ToolDeps {
 }
 
 const DEBUG = "read extensions/pi/tools.ts in joelhooks/peons";
+const SWARM_MAX = 64;
+const SWARM_MODELS = ["sol", "luna", "opus"] as const;
+const SWARM_DIR = ".peons/swarms";
 const NonEmpty = Schema.String.check(Schema.isMinLength(1));
 
 const refusal = (refused: Prompt): ToolOutput => ({ data: { tag: refused.tag }, isError: true, text: refused.message });
@@ -120,11 +123,54 @@ const RunParams = Schema.Struct({
   brief: Schema.optionalKey(Schema.String),
   docs: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   event: Schema.optionalKey(Schema.Struct({ data: Schema.Json, name: Schema.String })),
+  model: Schema.optionalKey(Schema.Literals(SWARM_MODELS)),
   peon: Schema.optionalKey(Schema.String),
   runId: Schema.optionalKey(Schema.String),
   scope: Schema.optionalKey(Schema.Array(Schema.String)),
   workType: Schema.optionalKey(Schema.String),
 });
+
+const SwarmJob = Schema.Struct({ digest: Schema.String, runId: Schema.String });
+const SwarmManifest = Schema.Union([
+  Schema.Struct({ runIds: Schema.Array(Schema.String), schema: Schema.Literal("peons.swarm.v1"), swarmId: Schema.String }),
+  Schema.Struct({ jobs: Schema.Array(SwarmJob), schema: Schema.Literal("peons.swarm.v2"), swarmId: Schema.String }),
+]);
+const swarmRunIds = (manifest: typeof SwarmManifest.Type): readonly string[] => ("jobs" in manifest ? manifest.jobs.map(({ runId }) => runId) : manifest.runIds);
+
+const SWARM_SHAPE = `{ jobs: [${RUN_SHAPE}, ...] (1 to ${SWARM_MAX}), swarmId?: "<id>" }`;
+const SwarmParams = Schema.Struct({
+  jobs: Schema.Array(RunParams).check(Schema.isMinLength(1), Schema.isMaxLength(SWARM_MAX)),
+  swarmId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,47}$/u))),
+});
+
+// Routing names provider/model refs; Mischief's gateway takes only its own aliases, so a {profile}
+// route maps here, before compile, and the frozen record names the model that really runs.
+const GATEWAY_OF: Readonly<Record<string, string>> = {
+  "claude-bridge/claude-opus-5-5": "opus",
+  "openai-codex/gpt-6-luna": "luna",
+  "openai-codex/gpt-6.1-sol": "sol",
+};
+const onGatewayModel = (model: string) => (GATEWAY_MODELS.some((name) => name === model) ? model : GATEWAY_OF[model]);
+
+const modelRefused = (why: string, fix: string) => prompt({ accepted: `a route on ${Object.keys(GATEWAY_OF).join(", ")} or a gateway alias (${GATEWAY_MODELS.join(", ")}); model override one of ${SWARM_MODELS.join(", ")}`, debug: "read GATEWAY_OF in extensions/pi/tools.ts and GATEWAY_MODELS in mischief packages/thinking/src/gateway.ts", did: "asked to run a peon on Mischief's gateway", fix, tag: "ModelRefused", why: `${why}. opus runs only where the host sets the Opus bridge (celld does)` });
+
+const routeOf = (resolved: Resolved | null): FrozenStep["route"] => (resolved === null ? null : { concept: resolved.concept, specialist: resolved.route.specialist, status: resolved.route.status, tableVersion: resolved.tableVersion });
+
+const swarmKind = (result: PeonRunResult | null): string => {
+  if (result === null) {return "missing";}
+  return "type" in result ? result.type.replace("peon.", "") : "running";
+};
+
+export const onGateway = (resolved: Resolved | null, loaded: LoadedTemplate | null, model?: string): Resolved | null | Prompt => {
+  if (loaded !== null) {
+    return model === undefined || model === loaded.spec.profile.model ? resolved : modelRefused(`template ${loaded.spec.template}@${loaded.spec.version} pins model ${loaded.spec.profile.model}, and the job asked for ${model}`, "drop model from the job, or use a workType route instead of the template");
+  }
+  if (resolved === null || !("profile" in resolved.route.specialist)) {return resolved;}
+  const { profile } = resolved.route.specialist;
+  const mapped = model ?? onGatewayModel(profile.model);
+  if (mapped === undefined) {return modelRefused(`the ${resolved.concept} route runs ${profile.model}, which Mischief's gateway does not serve`, `pass model: "sol" (or "opus") on the job, or move the ${resolved.concept} route to a gateway model in routing.json`);}
+  return { ...resolved, route: { ...resolved.route, specialist: { profile: { ...profile, model: mapped } } } };
+};
 
 const INPUT_SHAPE = 'brief: "<text>", docs?: { <slug>: "<text>" } | event: { name, data }';
 const InputParams = { brief: RunParams.fields.brief, docs: RunParams.fields.docs, event: RunParams.fields.event };
@@ -232,31 +278,89 @@ export const makeTools = (deps: ToolDeps) => {
       finish("peon_catalog"),
     );
 
+  const swarmPath = (swarmId: string) => nodePath.join(deps.cwd, SWARM_DIR, `${swarmId}.json`);
+  const storedSwarm = (swarmId: string) =>
+    deps.files.read(swarmPath(swarmId)).pipe(
+      Effect.map((bytes) => {
+        if (bytes === null) {return null;}
+        try {
+          const decoded = Schema.decodeUnknownOption(SwarmManifest)(JSON.parse(Buffer.from(bytes).toString("utf-8")));
+          return Option.isSome(decoded) ? decoded.value : "unreadable";
+        } catch {
+          return "unreadable";
+        }
+      }),
+    );
+  const recordSwarm = (swarmId: string, jobs: readonly (typeof SwarmJob.Type)[]) =>
+    deps.files.write(swarmPath(swarmId), `${JSON.stringify({ jobs, schema: "peons.swarm.v2", swarmId }, null, 2)}\n`);
+
+  const runOf = (tool: string, given: typeof RunParams.Type, desk: string, defaultRunId: (content: unknown) => string) =>
+    Effect.gen(function* runOfGen() {
+      if ((given.workType === undefined) === (given.peon === undefined))
+        {return yield* prompt({ accepted: RUN_SHAPE, debug: DEBUG, did: `called ${tool}`, fix: `call ${tool} with exactly one of workType or peon, like { workType: "research", brief }`, tag: "ParamsRefused", why: `it got ${given.workType === undefined ? "neither" : "both"}` });}
+      const input = yield* inputOf(tool, given);
+      const [name, version] = (given.peon ?? "").split("@");
+      const target = given.workType === undefined ? { kind: "template", template: name, version: version === undefined ? null : Number(version) } : { kind: "work-type", workType: given.workType };
+      const content = { base: given.base ?? null, input, scope: given.scope ?? [], target };
+      const runId = given.runId ?? defaultRunId(content);
+      const request = yield* decodeRequest(tool, { desk, runId, schema: "peons.request.v1", ...content });
+      const refusedAs = (template: string, route: FrozenStep["route"], refused: Prompt) => ({ refused: output(refusedRecord(request, template, route, refused)) });
+      const targeted = targetOf(catalog, request, templatesAccepted);
+      if ("refused" in targeted) {return { refused: targeted.refused };}
+      const { loaded, resolved: routed } = targeted;
+      const refusedName = loaded?.spec.template ?? routed?.concept.replaceAll("_", "-") ?? "unrouted";
+      const resolved = onGateway(routed, loaded, given.model);
+      if (resolved instanceof Prompt) {return refusedAs(refusedName, routeOf(routed), resolved);}
+      const compiled = compileRun(request, resolved, loaded);
+      if (compiled instanceof Prompt) {return refusedAs(refusedName, routeOf(resolved), compiled);}
+      return { compiled, digest: sha256(canonical(content)), refusedName, request, route: compiled.frozen.steps[compiled.frozen.final]?.route ?? null };
+    });
+
   const peon_run = (raw: unknown) =>
     Effect.gen(function* peonRunGen() {
       const given = yield* params("peon_run", RunParams, RUN_SHAPE)(raw);
       const desk = yield* deps.desk;
-      if ((given.workType === undefined) === (given.peon === undefined))
-        {return yield* prompt({ accepted: RUN_SHAPE, debug: DEBUG, did: "called peon_run", fix: 'call peon_run with exactly one of workType or peon, like peon_run({ workType: "research", brief })', tag: "ParamsRefused", why: `it got ${given.workType === undefined ? "neither" : "both"} a workType and a peon` });}
-      const input = yield* inputOf("peon_run", given);
-      const [name, version] = (given.peon ?? "").split("@");
-      const target = given.workType === undefined ? { kind: "template", template: name, version: version === undefined ? null : Number(version) } : { kind: "work-type", workType: given.workType };
-      const content = { base: given.base ?? null, input, scope: given.scope ?? [], target };
-      const runId = given.runId ?? `auto-${sha256(canonical(content)).slice(0, 24)}`;
-      const request = yield* decodeRequest("peon_run", { desk, runId, schema: "peons.request.v1", ...content });
-
-      const refusedAs = (template: string, route: FrozenStep["route"], refused: Prompt) => output(refusedRecord(request, template, route, refused));
-      const targeted = targetOf(catalog, request, templatesAccepted);
-      if ("refused" in targeted) {return targeted.refused;}
-      const { loaded, resolved } = targeted;
-      const refusedName = loaded?.spec.template ?? resolved?.concept.replaceAll("_", "-") ?? "unrouted";
-      const compiled = compileRun(request, resolved, loaded);
-      if (compiled instanceof Prompt) {return refusedAs(refusedName, resolved === null ? null : { concept: resolved.concept, specialist: resolved.route.specialist, status: resolved.route.status, tableVersion: resolved.tableVersion }, compiled);}
-      const frozenStep = compiled.frozen.steps[compiled.frozen.final];
+      const prepared = yield* runOf("peon_run", given, desk, (content) => `auto-${sha256(canonical(content)).slice(0, 24)}`);
+      if ("refused" in prepared) {return prepared.refused;}
       const host = yield* deps.host;
-      const result = yield* submitOnce(host, compiled, request, refusedName, frozenStep?.route ?? null);
-      return output(result, { mischiefRunId: compiled.runId });
+      const result = yield* submitOnce(host, prepared.compiled, prepared.request, prepared.refusedName, prepared.route);
+      return output(result, { mischiefRunId: prepared.compiled.runId });
     }).pipe(finish("peon_run"));
+
+  const peon_swarm = (raw: unknown) =>
+    Effect.gen(function* peonSwarmGen() {
+      const given = yield* params("peon_swarm", SwarmParams, SWARM_SHAPE)(raw);
+      const desk = yield* deps.desk;
+      const swarmId = given.swarmId ?? `swarm-${sha256(canonical(given.jobs)).slice(0, 16)}`;
+      const planned = given.jobs.map((job, index) => job.runId ?? `${swarmId}-${index}`);
+      const repeated = planned.filter((runId, index) => planned.indexOf(runId) !== index);
+      if (repeated.length > 0)
+        {return yield* prompt({ accepted: "a distinct runId per job, or no runId so each defaults to <swarmId>-<index>", debug: DEBUG, did: `called peon_swarm with ${planned.length} jobs`, fix: "give each job its own runId, or drop runId from the jobs", tag: "SwarmRefused", why: `runId ${[...new Set(repeated)].join(", ")} names more than one job, so they would collapse into one run` });}
+      const stored = yield* storedSwarm(swarmId);
+      const sameJobs = (jobs: readonly (typeof SwarmJob.Type)[]) => stored !== null && stored !== "unreadable" && "jobs" in stored && canonical(stored.jobs) === canonical(jobs);
+      const refuseReuse = () =>
+        prompt({ accepted: "the same jobs as the first call with this swarmId, or a new swarmId", debug: `read ${nodePath.join(SWARM_DIR, `${swarmId}.json`)}`, did: `called peon_swarm with swarmId ${swarmId}`, fix: "call peon_swarm without swarmId, or with a new one", tag: "SwarmRefused", why: "an earlier swarm with this id holds different jobs (by run id or content digest), and reusing it would report its old results as answers to the new jobs" });
+      const prepared = [];
+      for (const [index, job] of given.jobs.entries()) {
+        const one = yield* runOf("peon_swarm", job, desk, () => `${swarmId}-${index}`).pipe(Effect.result);
+        prepared.push(one);
+      }
+      const refusals = prepared.flatMap((one, index) => {
+        if (Result.isFailure(one)) {return [{ index, text: one.failure.message }];}
+        return "refused" in one.success ? [{ index, text: one.success.refused.text }] : [];
+      });
+      if (refusals.length > 0)
+        {return { data: { refused: refusals.map(({ index }) => index), swarmId }, isError: true, text: [`SwarmRefused: you called peon_swarm with ${given.jobs.length} jobs, and ${refusals.length} would not start, so none started`, ...refusals.map(({ index, text }) => `job ${index}: ${text.split("\n").join(" · ")}`), "Fix: correct each job above and call peon_swarm again with the same jobs; nothing was submitted.", `Debug: peon_catalog lists runnable peons and work-type routes; ${DEBUG}`].join("\n") };}
+      const ready = prepared.flatMap((one) => (Result.isSuccess(one) && !("refused" in one.success) ? [one.success] : []));
+      const jobs = ready.map((one) => ({ digest: one.digest, runId: one.request.runId }));
+      if (stored !== null && !sameJobs(jobs)) {return yield* refuseReuse();}
+      if (stored === null) {yield* recordSwarm(swarmId, jobs);}
+      const host = yield* deps.host;
+      const results = yield* Effect.forEach(ready, (one) => submitOnce(host, one.compiled, one.request, one.refusedName, one.route), { concurrency: 4 });
+      const runIds = jobs.map(({ runId }) => runId);
+      const lines = results.map((result, index) => `${index}. ${resultText(result).split("\n")[0] ?? ""}`);
+      return { data: { results, runIds, swarmId }, isError: false, text: [`🪓 swarm ${swarmId} · ${results.length} peons`, ...lines, `Watch it with peon_status({ swarmId: "${swarmId}" }).`].join("\n") };
+    }).pipe(finish("peon_swarm"));
 
   const inspected = (tool: string, runId: string) =>
     Effect.gen(function* inspectedGen() {
@@ -271,9 +375,30 @@ export const makeTools = (deps: ToolDeps) => {
       return { desk, host, id, report };
     });
 
+  const swarmStatus = (swarmId: string) =>
+    Effect.gen(function* swarmStatusGen() {
+      const stored = yield* storedSwarm(swarmId);
+      if (stored === null || stored === "unreadable")
+        {return yield* prompt({ accepted: "a swarmId peon_swarm returned from this working directory", debug: `read ${nodePath.join(SWARM_DIR, `${swarmId}.json`)}`, did: `called peon_status for swarm ${swarmId}`, fix: "call peon_status with the swarmId peon_swarm printed, from the same desk directory", tag: "UnknownSwarm", why: stored === null ? "no swarm with that id was recorded here" : "its record does not decode" });}
+      const desk = yield* deps.desk;
+      const host = yield* deps.host;
+      const runIds = swarmRunIds(stored);
+      const results = yield* Effect.forEach(runIds, (runId) =>
+        host.inspect(mischiefRunId(desk, runId)).pipe(
+          Effect.map((report) => fromRunReport(report, { desk, runId })),
+          Effect.catchTag("UnknownRun", () => Effect.succeed(null)),
+        ), { concurrency: 4 });
+      const counts: Record<string, number> = {};
+      for (const result of results) {counts[swarmKind(result)] = (counts[swarmKind(result)] ?? 0) + 1;}
+      const lines = results.map((result, index) => `${index}. ${result === null ? `missing · ${runIds[index] ?? ""}` : (resultText(result).split("\n")[0] ?? "")}`);
+      return { data: { counts, results, swarmId }, isError: false, text: [`🪓 swarm ${swarmId} · ${Object.entries(counts).map(([name, count]) => `${count} ${name}`).join(" · ")}`, ...lines].join("\n") };
+    });
+
   const peon_status = (raw: unknown) =>
     Effect.gen(function* peonStatusGen() {
-      const given = yield* params("peon_status", Schema.Struct({ runId: NonEmpty }), '{ runId: "<id>" }')(raw);
+      const asked = yield* params("peon_status", Schema.Union([Schema.Struct({ runId: NonEmpty }), Schema.Struct({ swarmId: NonEmpty })]), '{ runId: "<id>" } or { swarmId: "<id>" }')(raw);
+      if ("swarmId" in asked) {return yield* swarmStatus(asked.swarmId);}
+      const given = asked;
       const { desk, report } = yield* inspected("peon_status", given.runId);
       const result = fromRunReport(report, { desk, runId: given.runId });
       const docs = Object.fromEntries(Object.entries(report.docs).filter(([name]) => name !== FROZEN_DOC).map(([name, doc]) => [name, Buffer.byteLength(docText(doc), "utf-8")]));
@@ -390,5 +515,5 @@ export const makeTools = (deps: ToolDeps) => {
       return output(result, { mischiefRunId: compiled.runId, workflow: { digest: defined.digest, id: defined.definition.id, version: defined.definition.version } });
     }).pipe(finish("workflow_run"));
 
-  return { peon_answer, peon_catalog, peon_run, peon_status, peon_verify, workflow_define, workflow_run };
+  return { peon_answer, peon_catalog, peon_run, peon_status, peon_swarm, peon_verify, workflow_define, workflow_run };
 };

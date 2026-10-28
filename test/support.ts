@@ -30,7 +30,7 @@ export const routing: RoutingTable = Schema.decodeSync(RoutingTable)({
   routes: {
     ask: { source: "test", specialist: { peon: "fix-ask@2" }, status: "provisional", why: "fixture ask" },
     review: { source: "test", specialist: { peon: "fix-review@1" }, status: "provisional", why: "fixture review" },
-    scan: { source: "test", specialist: { profile: { model: "claude-bridge/claude-haiku-5-5", thinking: "low" } }, status: "measured", why: "fixture scan" },
+    scan: { source: "test", specialist: { profile: { model: "openai-codex/gpt-6-luna", thinking: "low" } }, status: "measured", why: "fixture scan" },
     work: { source: "test", specialist: { profile: { model: "openai-codex/gpt-6.1-sol", thinking: "medium" } }, status: "provisional", why: "fixture default" },
   },
   schema: "agent-graph.routing.v0.1",

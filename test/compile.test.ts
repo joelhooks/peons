@@ -96,9 +96,9 @@ describe("compile", () => {
     const resolved = resolveRoute(routing, "scan");
     if (resolved instanceof RouteRefused) {throw resolved;}
     const out = compiled(compilePeonPlan(request(), resolved));
-    expect(stepAt(out, "work")).toMatchObject({ agent: { model: "claude-bridge/claude-haiku-5-5", thinking: "low" }, kind: "think", writes: "artifact" });
+    expect(stepAt(out, "work")).toMatchObject({ agent: { model: "openai-codex/gpt-6-luna", thinking: "low" }, kind: "think", writes: "artifact" });
     expect(out.docs[INPUT_DOC]).toBe("Find the three slowest gates.");
-    expect(out.frozen.steps.work).toEqual({ cites: {}, profile: { model: "claude-bridge/claude-haiku-5-5", thinking: "low" }, route: { concept: "scan", specialist: { profile: { model: "claude-bridge/claude-haiku-5-5", thinking: "low" } }, status: "measured", tableVersion: 3 }, template: null, verdict: null });
+    expect(out.frozen.steps.work).toEqual({ cites: {}, profile: { model: "openai-codex/gpt-6-luna", thinking: "low" }, route: { concept: "scan", specialist: { profile: { model: "openai-codex/gpt-6-luna", thinking: "low" } }, status: "measured", tableVersion: 3 }, template: null, verdict: null });
     expect(out.docs[FROZEN_DOC]).toEqual(JSON.parse(canonical(out.frozen)));
     expect(out.runId).toBe(mischiefRunId(DESK, "run-1"));
     expect("version" in out.plan).toBe(false);

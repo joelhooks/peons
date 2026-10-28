@@ -81,7 +81,7 @@ export const DocKey = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_-]{0,6
 export const RatKingName = Schema.String.check(Schema.isPattern(/^(?:[a-z0-9]+(?:-[a-z0-9]+)*\/)?[a-z][a-z0-9_-]{0,31}$/u));
 // Mischief's gateway aliases (GATEWAY_MODELS in mischief packages/thinking/src/gateway.ts), or a
 // provider/model ref.
-export const GATEWAY_MODELS = ["sol", "luna", "gpt-6-luna", "gpt-6.1-sol"] as const;
+export const GATEWAY_MODELS = ["sol", "luna", "gpt-6-luna", "gpt-6.1-sol", "opus", "claude-opus-5-5"] as const;
 const ModelRef = Schema.Union([Schema.Literals(GATEWAY_MODELS), Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/u))]);
 const ToolName = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$/u));
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
