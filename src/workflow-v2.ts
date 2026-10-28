@@ -1,6 +1,7 @@
 // Composed workflows schedule existing plans; Mischief still owns each plan's states and gates.
 // Lifecycle sketch: waiting --inputs settled--> missing --submit/observe--> active
-// active --done--> done; active --failure--> retryable --next attempt--> active
+// active --done--> done; active --terminal failure--> retryable --next attempt--> active
+// halted --abort request--> aborting --observed aborted--> retryable (or failed at cap).
 // retryable --cap--> failed; waiting --dependency failed--> failed. Reconcile has no effects.
 import { Result, Schema } from "effect";
 
@@ -163,8 +164,14 @@ export interface Attempt {
   readonly compiled: Compiled;
   readonly batch: Schema.Json | null;
 }
-export type LeafStatus = "missing" | "active" | "done" | "failed";
+export interface Abort {
+  readonly runId: string;
+  readonly supersededBy: string | undefined;
+  readonly reason: string;
+}
+export type LeafStatus = "missing" | "active" | "aborting" | "done" | "failed";
 export interface Leaf {
+  readonly abort?: Abort;
   readonly path: string;
   readonly status: LeafStatus;
   readonly attempts: readonly Attempt[];
@@ -172,6 +179,7 @@ export interface Leaf {
   readonly report: RunReport | undefined;
 }
 export interface Reconciled {
+  readonly abort: readonly Abort[];
   readonly status: "running" | "done" | "failed";
   readonly submit: readonly Attempt[];
   readonly inspect: readonly string[];
@@ -202,7 +210,11 @@ const materialize = (task: BoundTask, docs: Readonly<Record<string, Schema.Json>
   return { docs: seeded, frozen, plan: task.seed.plan, runId };
 };
 
-const failed = (report: RunReport) => ["failed", "aborted", "stuck", "envelope-exceeded", "amendment-refused"].includes(report.status) || (report.status === "done" && report.value === "rejected");
+// Mischief 709479c runs/schema.ts: terminalStatuses are done, amendment-refused, aborted, failed.
+// Terminal failures need no abort. Provider waits resume automatically; stuck/envelope-exceeded
+// can also resume and must be aborted before replacement.
+const failed = (report: RunReport) => ["failed", "aborted", "amendment-refused"].includes(report.status) || (report.status === "done" && report.value === "rejected");
+const resumableHalt = (report: RunReport) => report.status === "stuck" || report.status === "envelope-exceeded";
 const invalidVerdict = (task: BoundTask, report: RunReport): boolean => {
   if (report.status !== "done") {return false;}
   const verdict = task.seed.frozen.steps[task.seed.frozen.final]?.verdict;
@@ -285,6 +297,11 @@ const settleLeaf = (definition: DefinedComposition, task: BoundTask, path: strin
     attempts.push(next);
     const report = runs[runId];
     if (report === undefined) {return { attempts, latest: next, path, report, status: "missing" };}
+    if (resumableHalt(report)) {
+      const supersededBy = attempt < cap ? attemptId(definition.digest, path, inputDigests, profiles, attempt + 1, definition.definition.desk) : undefined;
+      const reason = supersededBy === undefined ? `workflow leaf ${path} halted at retry cap ${cap}` : `workflow leaf ${path} superseded by attempt ${attempt + 1}`;
+      return { abort: { reason, runId, supersededBy }, attempts, latest: next, path, report, status: "aborting" };
+    }
     if (failed(report) || invalidVerdict(task, report) || invalidBatchVerdict(task, batch, report, path)) {
       if (attempt < cap) {continue;}
       return { attempts, latest: next, path, report, status: "failed" };
@@ -371,5 +388,5 @@ export const reconcile = (definition: DefinedComposition, observed: Observed): R
       docs[`${step.id}.${outputOf(step)}`] = step.kind === "map" ? outputs.map((doc) => doc ?? null) : outputs[0] ?? null;
     }
   }
-  return { docs, inspect, leaves: allLeaves, status: overall(steps), steps, submit };
+  return { abort: allLeaves.flatMap((leaf) => leaf.abort === undefined ? [] : [leaf.abort]), docs, inspect, leaves: allLeaves, status: overall(steps), steps, submit };
 };

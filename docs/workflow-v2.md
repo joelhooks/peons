@@ -68,25 +68,33 @@ reconcile(definedComposition, {
 });
 ```
 
-The result contains `submit`, `inspect`, leaf and step states, named `docs`, and an overall `status`. Missing inputs, invalid plans and malformed gather output return the standard four-line refusal. Reconcile never changes its arguments or performs I/O.
+The result contains `abort`, `submit`, `inspect`, leaf and step states, named `docs`, and an overall `status`. Each abort intent contains `runId`, `supersededBy` (the next attempt id when under the cap), and `reason`. Missing inputs, invalid plans and malformed gather output return the standard four-line refusal. Reconcile never changes its arguments or performs I/O.
 
 Lifecycle:
 
 ```text
 waiting -> missing -> active -> done
-                         | failure
+                         | terminal failure
                          v
                     next attempt -> active
                          | attempt cap
                          v
                        failed -> dependent steps failed
+
+active -> stuck / envelope-exceeded -> aborting -> observed aborted
+                                                    | under cap: next attempt
+                                                    | at cap: failed
 ```
 
-An absent leaf starts at `a1`. A done map attempt whose verdict fails JSON decoding or batch 1:1 membership also follows the failure transition; a missing item cannot leave the composition refusing forever. A failed, aborted, stuck, envelope-exceeded or amendment-refused attempt advances to `a(n+1)` while `n < retryCap`. A v1 workflow ending in `rejected` also counts as failed. Active and blocked attempts never resubmit. At the cap, the leaf remains failed and reconcile returns no submission for it. Independent ready leaves can still proceed when another branch fails.
+An absent leaf starts at `a1`. A done map attempt whose verdict fails JSON decoding or batch 1:1 membership also follows the failure transition; a missing item cannot leave the composition refusing forever. Terminal `failed`, `aborted` and `amendment-refused` attempts advance to `a(n+1)` while `n < retryCap`. A v1 workflow ending in `rejected` also counts as failed. A done run with an invalid verdict is terminal too, so these cases need no abort.
+
+`stuck` and `envelope-exceeded` are resumable halts, not terminal failures. Reconcile returns an abort intent and keeps the leaf `aborting`; it never returns that leaf's replacement in the same reconciliation. The adapter calls `abortRun` with `supersededBy: <next attempt id>` before that replacement can start. Only a later reconciliation observing a terminal report can advance. At the cap, it aborts the halted attempt without naming a nonexistent replacement, then marks the leaf failed once the abort is observed. Terminal aborts are idempotent; the fake and live adapters match Mischief's contract.
+
+`running`, `paused`, `waiting-for-reply`, `waiting-for-joel` and `waiting-for-provider` are active and never trigger a retry or abort. In particular, Mischief resumes `waiting-for-provider` itself after an outage. Active and blocked attempts never resubmit. At the cap, a terminal failed leaf stays failed and reconcile returns no submission for it. Independent ready leaves can still proceed when another branch fails.
 
 Each attempt id hashes the definition digest, step path, selected input digests (including the batch), and all bound profiles. The desk-scoped `mischiefRunId` is suffixed with `-a<n>`. The actual host id stays within 64 lowercase letters, digits and hyphens. Changed input cannot reuse a previous verdict. Each attempt's frozen record contains its bound profiles.
 
-The Pi adapter inspects the ids reconcile derives, repeats discovery when settled inputs expose more leaves, validates every ready leaf, writes a content-addressed manifest, then submits missing attempts with concurrency 4. A crash after some submissions needs no local cursor: the next call discovers the host records and submits only the remaining attempts. Manifests are immutable receipts under `.peons/workflow-runs/`, not progress state. The host's idempotent submit handles concurrent callers racing on the same absent run. Peons cannot guarantee that two simultaneous callers never invoke submit for the same absent id; the sequential crash/retry property guarantees no resubmission once the host record is observable.
+The Pi adapter inspects the ids reconcile derives, repeats discovery when settled inputs expose more leaves, validates every ready leaf, writes a content-addressed manifest, then executes abort intents before submitting missing attempts, with concurrency 4 for each phase. It does not submit a halted leaf's replacement until a subsequent call observes the abort. The manifest records both abort intents and submissions. A crash after some submissions needs no local cursor: the next call discovers the host records and submits only the remaining attempts. Manifests are immutable receipts under `.peons/workflow-runs/`, not progress state. The host's idempotent submit handles concurrent callers racing on the same absent run. Peons cannot guarantee that two simultaneous callers never invoke submit for the same absent id; the sequential crash/retry property guarantees no resubmission once the host record is observable.
 
 Gather returns per-item verdicts and per-leaf usage for **all attempts**, including failed attempts. Tokens come from each report's `thinking.tokens`; list cost comes from optional host-reported `listCostUsd`. Missing usage or cost is `null`, not an estimate or zero dollars. Current hosts that do not report list cost therefore return `null` cost.
 
@@ -94,7 +102,7 @@ V2 results expose actual host run ids. Re-call `workflow_run` to observe and adv
 
 ## Verification
 
-`test/workflow-v2.test.ts` runs three generated properties against `fakeHost()`: 100 nested workflow/crash/retry/input-replay schedules, 100 mixed per-leaf failure schedules, and 100 omitted-item verdict schedules that recover below the cap or end failed at the cap without refusing. It also covers partial submission recovery, manifest-before-submit ordering, input limits, 64-leaf bounds, exact gather membership, all-attempt usage, gate answers, invalid template verdicts and empty maps. No live host submits are part of these tests.
+`test/workflow-v2.test.ts` runs three generated properties against `fakeHost()`: 100 nested workflow/crash/retry/input-replay schedules, 100 mixed per-leaf failure schedules, and 100 omitted-item verdict schedules that recover below the cap or end failed at the cap without refusing. It also covers partial submission recovery, manifest-before-submit ordering, input limits, 64-leaf bounds, exact gather membership, all-attempt usage, gate answers, invalid template verdicts and empty maps. `test/workflow-abort.test.ts` adds a 100-case generated resume/crash/abort property: at most one non-terminal attempt per leaf at every transition, with eventual convergence or cap failure. It resumes halted runs between observation and abort, tests every active/wait status (including provider waits), terminal abort idempotency, manifest-before-abort ordering, and cancellation at the cap. No live host submits or aborts are part of these tests.
 
 Mutation receipts from scratch copies, using `vitest run test/workflow-v2.test.ts --maxWorkers=4 -t 'generated nested workflows'`:
 
@@ -102,5 +110,6 @@ Mutation receipts from scratch copies, using `vitest run test/workflow-v2.test.t
 - **Plant B:** changed the failed-attempt branch to return that same attempt as missing. The property failed (exit 1) with `Error: duplicate attempt`; retries could not converge without resubmitting an existing id.
 - Reverted both plants in their scratch copies. The same property then passed in each copy (exit 0), and both restored sources matched the working source byte-for-byte. Neither mutation was applied to the working checkout.
 - **Follow-up plant C:** removed the map-verdict check from `settleLeaf`, leaving validation in gather only. The generated omitted-item verdict property failed with exit 1 on the old permanent-refusal path. Restoring the check made the same property pass. This proves that gather-only validation does not satisfy retry liveness.
+- **Follow-up plant D:** disabled abort intents and counted `stuck`/`envelope-exceeded` as terminal failures again. `vitest run test/workflow-abort.test.ts --maxWorkers=4 -t 'generated resume/crash/abort schedules'` failed with exit 1 and `Error: two live attempts for one leaf`. Restored the abort barrier; the same property passed (exit 0), and the restored source matched the working source byte-for-byte. The mutation stayed in a scratch copy.
 
-Bundles, imports, portable model binding, extra host adapters and `peon_swarm` sugar are outside this slice.
+Leaf deadlines for `paused` or `waiting-for-joel` runs are a later item; this slice does not timeout or cancel them. Bundles, imports, portable model binding, extra host adapters and `peon_swarm` sugar are outside this slice.

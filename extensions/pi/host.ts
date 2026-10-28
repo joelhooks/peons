@@ -1,4 +1,4 @@
-// The run host the tools drive: four Mischief capabilities, submitPlan, inspectRun, deliverReply
+// The run host the tools drive: submitPlan, inspectRun, abortRun, deliverReply
 // (an ask's reply) and answerRun (a judge escalation's choice).
 // The live adapter speaks them over HTTP; tests use an in-memory host. Durability, visits and
 // idempotency on runId belong to Mischief; the port only carries calls.
@@ -20,6 +20,7 @@ export class AnswerRefused extends Schema.TaggedError<AnswerRefused, { readonly 
 export class HostFailure extends Schema.TaggedError<HostFailure, { readonly brand: unique symbol }>()("HostFailure", { message: Schema.String }) {}
 
 export interface RunHostPort {
+  readonly abort: (runId: string, supersededBy: string | undefined, reason: string) => Effect.Effect<RunReport, UnknownRun | HostFailure>;
   readonly submit: (runId: string, plan: MischiefSubmission, docs: Readonly<Record<string, Schema.Json>>) => Effect.Effect<RunReport, PlanRefused | HostFailure>;
   readonly inspect: (runId: string) => Effect.Effect<RunReport, UnknownRun | HostFailure>;
   readonly deliver: (line: ReplyLine) => Effect.Effect<RunReport, ReplyRefused | HostFailure>;

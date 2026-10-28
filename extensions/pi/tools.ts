@@ -546,19 +546,25 @@ export const makeTools = (deps: ToolDeps) => {
       }
       // Every ready leaf has been validated before this write or the first submit. The manifest is
       // content-addressed per reconciliation; it is a receipt, not a mutable scheduler database.
-      const manifest = { attempts: state.submit.map(({ path, runId, attempt }) => ({ attempt, path, runId })), definition: defined.digest, input: inputs, schema: "peons.workflow-manifest.v2" };
+      const manifest = { abort: state.abort, attempts: state.submit.map(({ path, runId, attempt }) => ({ attempt, path, runId })), definition: defined.digest, input: inputs, schema: "peons.workflow-manifest.v2" };
       const manifestId = sha256(canonical(manifest));
       const manifestPath = nodePath.join(deps.cwd, ".peons", "workflow-runs", `${manifestId}.json`);
       const previous = yield* deps.files.read(manifestPath);
       const text = `${canonical(manifest)}\n`;
       if (previous === null) {yield* deps.files.write(manifestPath, text);}
       else if (Buffer.from(previous).toString("utf-8") !== text) {return yield* compositionRefused("the manifest digest no longer matches its contents");}
+      // A resumable halt is not a failed attempt until the host makes it terminal. Persist the
+      // abort intent first, and never submit that leaf's replacement in this reconciliation.
+      const abortResults = yield* Effect.forEach(state.abort, (intent) => host.abort(intent.runId, intent.supersededBy, intent.reason).pipe(
+        Effect.map((report) => ({ runId: intent.runId, status: report.status })),
+        Effect.catchTag("UnknownRun", () => Effect.fail(compositionRefused(`cannot abort unknown halted run ${intent.runId}; retry after inspecting the host`))),
+      ), { concurrency: 4 });
       const results = yield* Effect.forEach(state.submit, (attempt) => host.submit(attempt.runId, attempt.compiled.plan, attempt.compiled.docs).pipe(
         Effect.map((report) => ({ runId: attempt.runId, status: report.status })),
         Effect.catchTag("PlanRefused", (refused) => Effect.fail(compositionRefused(`host refused ${attempt.runId}: ${refused.errors.join("; ")}`))),
       ), { concurrency: 4 });
       const snapshot: Reconciled = state;
-      return { data: { digest: defined.digest, docs: snapshot.docs, leaves: snapshot.leaves.map(({ latest, path, status }) => ({ attempt: latest.attempt, path, runId: latest.runId, status })), manifest: manifestPath, results, status: snapshot.status, steps: snapshot.steps }, isError: snapshot.status === "failed", text: `🧩 workflow ${defined.definition.id} · ${snapshot.status} · submitted ${results.length} attempts\nManifest: ${manifestPath}\nRe-call workflow_run with the same definition and input after leaves settle.` };
+      return { data: { abortResults, digest: defined.digest, docs: snapshot.docs, leaves: snapshot.leaves.map(({ latest, path, status }) => ({ attempt: latest.attempt, path, runId: latest.runId, status })), manifest: manifestPath, results, status: snapshot.status, steps: snapshot.steps }, isError: snapshot.status === "failed", text: `🧩 workflow ${defined.definition.id} · ${snapshot.status} · processed ${abortResults.length} abort intents · submitted ${results.length} attempts\nManifest: ${manifestPath}\nRe-call workflow_run with the same definition and input after leaves settle.` };
     });
 
   const WORKFLOW_RUN_SHAPE = `{ workflow: "<path workflow_define wrote>", runId?: "<v1 id>", ${INPUT_SHAPE} }`;

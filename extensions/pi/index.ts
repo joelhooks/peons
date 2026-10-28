@@ -164,7 +164,7 @@ export default function peons(pi: ExtensionAPI) {
   });
   pi.registerTool({
     annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true, readOnlyHint: false },
-    description: "V1: submit one Mischief plan, idempotent on runId; watch with peon_status. V2: omit runId; reconcile the composition, submit only missing attempts, and re-call with identical input after leaves settle. Each v1 workflow leaf stays one plan with its gates intact. V2 writes a manifest before submitting; no background watcher starts.",
+    description: "V1: submit one Mischief plan, idempotent on runId; watch with peon_status. V2: omit runId; reconcile the composition, submit only missing attempts, and re-call with identical input after leaves settle. Each v1 workflow leaf stays one plan with its gates intact. V2 writes a manifest before aborting resumable halts or submitting attempts. A replacement starts only after the old attempt is terminal; provider waits stay active. No background watcher starts.",
     execute: execute("workflow_run"),
     label: "Workflow run",
     name: "workflow_run",

@@ -81,7 +81,7 @@ const unexpected = (name: string) => (error: { readonly _tag: string }) => Effec
 
 export const liveRunHost = (options: LiveOptions): RunHostPort => {
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
-  const call = (name: "submitPlan" | "inspectRun" | "deliverReply" | "answerRun", input: unknown) =>
+  const call = (name: "submitPlan" | "inspectRun" | "deliverReply" | "answerRun" | "abortRun", input: unknown) =>
     Effect.gen(function* callGen() {
       const did = `called Mischief ${name}`;
       const signer = yield* options.signer.pipe(Effect.mapError((refusal) => new HostFailure({ message: refusal.message })));
@@ -121,6 +121,7 @@ export const liveRunHost = (options: LiveOptions): RunHostPort => {
     });
 
   return {
+    abort: (runId, supersededBy, reason) => call("abortRun", { reason, runId, supersededBy }).pipe(Effect.catchTags({ AnswerRefused: unexpected("abortRun"), PlanRefused: unexpected("abortRun"), ReplyRefused: unexpected("abortRun") })),
     answer: (runId, reply) => call("answerRun", { reply, runId }).pipe(Effect.catchTags({ PlanRefused: unexpected("answerRun"), ReplyRefused: unexpected("answerRun") })),
     deliver: (line) =>
       call("deliverReply", line).pipe(Effect.catchTags({ AnswerRefused: unexpected("deliverReply"), PlanRefused: unexpected("deliverReply"), UnknownRun: (unknown) => Effect.fail(new ReplyRefused({ reason: `run ${unknown.runId} is unknown`, replyTo: line.replyTo })) })),

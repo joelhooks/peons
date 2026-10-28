@@ -82,21 +82,31 @@ export const bool = Arbitrary.schema(Schema.Boolean);
 export interface FakeHost {
   readonly host: RunHostPort;
   readonly runs: Map<string, { body: string; report: RunReport }>;
-  readonly calls: { submit: string[]; charges: string[]; inspect: string[]; deliver: ReplyLine[]; answer: { runId: string; reply: string }[] };
+  readonly calls: { abort: { runId: string; supersededBy: string | undefined; reason: string }[]; submit: string[]; charges: string[]; inspect: string[]; deliver: ReplyLine[]; answer: { runId: string; reply: string }[] };
+  readonly resume: (runId: string) => void;
   readonly patch: (runId: string, change: Partial<RunReport>) => void;
 }
 
 export const fakeHost = (): FakeHost => {
   const runs = new Map<string, { body: string; report: RunReport }>();
-  const calls: FakeHost["calls"] = { answer: [], charges: [], deliver: [], inspect: [], submit: [] };
+  const calls: FakeHost["calls"] = { abort: [], answer: [], charges: [], deliver: [], inspect: [], submit: [] };
+  // Match Mischief terminalStatuses: stuck and envelope-exceeded are resumable halts.
+  const terminal = new Set(["done", "amendment-refused", "aborted", "failed"]);
   const host: RunHostPort = {
+    abort: (runId, supersededBy, reason) => Effect.suspend(() => {
+      calls.abort.push({ reason, runId, supersededBy });
+      const run = runs.get(runId);
+      if (run === undefined) {return Effect.fail(new UnknownRun({ runId }));}
+      if (!terminal.has(run.report.status)) {run.report = { ...run.report, status: "aborted" };}
+      return Effect.succeed(run.report);
+    }),
     answer: (runId, reply) =>
       Effect.suspend((): Effect.Effect<RunReport, UnknownRun | AnswerRefused> => {
         calls.answer.push({ reply, runId });
         const run = runs.get(runId);
         if (run === undefined) {return Effect.fail(new UnknownRun({ runId }));}
         const {question} = run.report;
-        if (question === undefined || !question.options.includes(reply)) {return Effect.fail(new AnswerRefused({ reason: "no open question takes that reply", runId }));}
+        if (terminal.has(run.report.status) || question === undefined || !question.options.includes(reply)) {return Effect.fail(new AnswerRefused({ reason: "no open question takes that reply", runId }));}
         const { question: _question, ...rest } = run.report;
         run.report = { ...rest, status: "running" };
         return Effect.succeed(run.report);
@@ -105,7 +115,7 @@ export const fakeHost = (): FakeHost => {
       Effect.suspend(() => {
         calls.deliver.push(line);
         const run = runs.get(line.runId ?? "");
-        if (run === undefined || !(run.report.awaiting ?? []).some(({ messageId }) => messageId === line.replyTo)) {return Effect.fail(new ReplyRefused({ reason: "no open ask has that message id", replyTo: line.replyTo }));}
+        if (run === undefined || terminal.has(run.report.status) || !(run.report.awaiting ?? []).some(({ messageId }) => messageId === line.replyTo)) {return Effect.fail(new ReplyRefused({ reason: "no open ask has that message id", replyTo: line.replyTo }));}
         const { awaiting: _awaiting, ...rest } = run.report;
         run.report = { ...rest, status: "running" };
         return Effect.succeed(run.report);
@@ -135,7 +145,11 @@ export const fakeHost = (): FakeHost => {
     const run = runs.get(runId);
     if (run !== undefined) {run.report = { ...run.report, ...change };}
   };
-  return { calls, host, patch, runs };
+  const resume = (runId: string) => {
+    const run = runs.get(runId);
+    if (run !== undefined && !terminal.has(run.report.status)) {run.report = { ...run.report, status: "running" };}
+  };
+  return { calls, host, patch, resume, runs };
 };
 
 export const memoryFiles = () => {
