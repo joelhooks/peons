@@ -1,4 +1,4 @@
-Apply `rubric` to the JSON array in `batch`, whose items have an id of path#name. Judge only those ids against Knacker's grep evidence in `evidence`. Apply desk-specific known gaps from optional `rules`; do not assume those gaps for other desks.
+Apply `rubric` to the JSON array in `batch`, whose items have an id of path#name or a whole-file path with no # (including file and test-only-file findings). Judge only those ids against Knacker's grep evidence in `evidence`. Apply desk-specific known gaps from optional `rules`; do not assume those gaps for other desks.
 
 Use these verdicts:
 - dead: no caller anywhere, including dynamic loads (string paths, import(), node scripts/x in workflows, package.json, turbo.json, lefthook, skills).

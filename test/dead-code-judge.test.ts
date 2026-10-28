@@ -6,7 +6,7 @@ import { Prompt, compileRun } from "../src/compile.ts";
 import { PeonRefused } from "../src/contract.ts";
 import { decodeVerdict, fromRunReport } from "../src/run-report.ts";
 import { compile, loadTemplate } from "../src/think-template.ts";
-import { quotesOf, verifyQuotes } from "../src/verdicts.ts";
+import { quotesOf, verifyDeadCodeProof, verifyQuotes } from "../src/verdicts.ts";
 import { defineComposition, gather, reconcile } from "../src/workflow-v2.ts";
 import { DESK, catalog, fakeHost, forAll, int } from "./support.ts";
 
@@ -17,6 +17,7 @@ const docs = { batch: JSON.stringify(batch), evidence };
 const verdict = { items: batch.map(({ id }) => ({ confidence: "high", id, proof: [{ quote: evidence, source: "evidence" }], testFilesCoveringOnlyIt: [], verdict: "live" })), schema: "peons.verdict.dead-code.v1" };
 const request = { base: null, desk: DESK, input: { docs, kind: "brief" as const, text: "Judge these ids" }, runId: "dead-code", schema: "peons.request.v1" as const, scope: [], target: { kind: "template" as const, template: "dead-code-judge", version: 1 } };
 const name = "peons.verdict.dead-code.v1";
+const proofOutput = (id: string, quote: string, label: "dead" | "drop-export") => ({ items: [{ confidence: "high", id, proof: [{ quote, source: "evidence" }], testFilesCoveringOnlyIt: [], verdict: label }], schema: name } as const);
 const unwrap = <A>(value: A | Prompt): A => {if (value instanceof Prompt) {throw new TypeError(value.message);} return value;};
 
 describe("dead-code-judge@1", () => {
@@ -62,6 +63,37 @@ describe("dead-code-judge@1", () => {
         if (!decodeVerdict(name, { items: symbolItems, schema: name }, inputDocs).ok) {return false;}
         // A linked quote on other items must not cover the one that still lacks a link.
         if (destructive && decodeVerdict(name, { items: linkedItems.map((item, index) => index === count - 1 ? { ...item, proof: [{ quote: "e", source: "evidence" }] } : item), schema: name }, inputDocs).ok) {return false;}
+      }
+      return true;
+    }, 200)).toBeUndefined();
+  });
+
+  it("generated whole-file and empty-part ids require a nonempty matching part", async () => {
+    expect(await forAll(int(0, 100_000), (serial) => {
+      const path = `apps/cd/src/x${serial}.ts`;
+      const symbol = `symbol${serial}`;
+      const generatedEvidence = `e\n${path}\n${symbol}\n${path.slice(0, -1)}`;
+      for (const label of ["dead", "drop-export"] as const) {
+        for (const { id, kind, quote } of [
+          { id: path, kind: "file", quote: path },
+          { id: path, kind: "test-only-file", quote: path },
+          { id: `${path}#`, kind: "file", quote: path },
+          { id: `#${symbol}`, kind: "export", quote: symbol },
+          { id: `package.json#${symbol}`, kind: "dependency", quote: symbol },
+        ]) {
+          const inputDocs = { batch: JSON.stringify([{ id, kind }]), evidence: generatedEvidence };
+          const weak = proofOutput(id, "e", label);
+          const linked = proofOutput(id, quote, label);
+          if (decodeVerdict(name, weak, inputDocs).ok || verifyDeadCodeProof(weak)) {return false;}
+          if (!decodeVerdict(name, linked, inputDocs).ok || !verifyDeadCodeProof(linked)) {return false;}
+        }
+        // The old slice(0, -1) bug accepted a path with its last character missing.
+        const truncated = proofOutput(path, path.slice(0, -1), label);
+        if (decodeVerdict(name, truncated, { batch: JSON.stringify([{ id: path }]), evidence: generatedEvidence }).ok || verifyDeadCodeProof(truncated)) {return false;}
+        for (const id of ["", "#", `${path}##${symbol}`, `${path}#${symbol}#extra`]) {
+          if (decodeVerdict(name, proofOutput(id, generatedEvidence, label), { batch: JSON.stringify([{ id }]), evidence: generatedEvidence }).ok) {return false;}
+        }
+        for (const id of ["", "#"]) {if (verifyDeadCodeProof(proofOutput(id, generatedEvidence, label))) {return false;}}
       }
       return true;
     }, 200)).toBeUndefined();

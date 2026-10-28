@@ -339,7 +339,7 @@
       "kind": "judge",
       "summary": "Judge a dead-code batch from exact grep evidence, including dynamic callers and own-file use.",
       "owner": "agent-graph/desk",
-      "input": "JSON batch of {id} items (path#name), Knacker grep evidence, and optional desk-specific rules.",
+      "input": "JSON batch of {id} items (path#name or a whole-file path), Knacker grep evidence, and optional desk-specific rules.",
       "output": "peons.verdict.dead-code.v1: one evidence-quoted dead/live/drop-export/unsure verdict per id, confidence and exclusive test files.",
       "verify": "Validate 1:1 batch ids and exact evidence substrings. Missing caller coverage means unsure.",
       "needs": [

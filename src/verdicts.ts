@@ -30,7 +30,7 @@ export const InvestigationVerdict = Schema.Struct({
 export const DeadCodeVerdict = Schema.Struct({
   items: Schema.Array(Schema.Struct({
     confidence: Schema.Literals(["high", "medium", "low"]),
-    id: NonEmpty.check(Schema.isPattern(/^[^#]+#[^#]+$/u)),
+    id: NonEmpty.check(Schema.isPattern(/^(?:[^#]+(?:#[^#]*)?|#[^#]+)$/u)),
     proof: Schema.NonEmptyArray(Evidence),
     testFilesCoveringOnlyIt: Schema.Array(NonEmpty),
     verdict: Schema.Literals(["dead", "live", "drop-export", "unsure"]),
@@ -57,9 +57,9 @@ export const verifyDeadCodeBatch = (verdict: typeof DeadCodeVerdict.Type, batch:
 export const verifyDeadCodeProof = (verdict: typeof DeadCodeVerdict.Type): boolean => verdict.items.every((item) => {
   if (item.verdict !== "dead" && item.verdict !== "drop-export") {return true;}
   const separator = item.id.indexOf("#");
-  const path = item.id.slice(0, separator);
-  const symbol = item.id.slice(separator + 1);
-  return item.proof.some(({ quote }) => quote.includes(path) || quote.includes(symbol));
+  const path = separator === -1 ? item.id : item.id.slice(0, separator);
+  const symbol = separator === -1 ? "" : item.id.slice(separator + 1);
+  return item.proof.some(({ quote }) => (path.length > 0 && quote.includes(path)) || (symbol.length > 0 && quote.includes(symbol)));
 });
 
 export const verdicts = {
