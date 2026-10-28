@@ -100,7 +100,7 @@ describe("workflow_define", () => {
     expect(defined.steps.gather).toMatchObject({ route: { concept: "scan", tableVersion: 3 }, template: null, verdict: null });
     expect(defined.steps.judge).toMatchObject({ cites: { brief: "judge-brief", rules: "judge-rules", subject: "gather" }, route: { concept: "review" }, template: { template: "fix-review", version: 1 }, verdict: "peons.verdict.change-review.v1" });
     expect(defined.plan.envelope.names).toEqual([DESK]);
-    expect(defined.plan.envelope.models).toEqual(["claude-bridge/claude-haiku-5-5", "sol"]);
+    expect(defined.plan.envelope.models).toEqual(["openai-codex/gpt-6-luna", "sol"]);
     expect("version" in defined.plan).toBe(false);
   });
 
