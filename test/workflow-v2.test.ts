@@ -14,7 +14,7 @@ const unwrap = <A>(value: A | Prompt): A => {
 };
 const nested = (count = 2, gate = "verify") => unwrap(defineWorkflow({
   desk: DESK, id: "nested", schema: "peons.workflow.v1",
-  steps: Array.from({ length: count }, (_, index) => ({ check: "has evidence", gate, id: `step${index}`, input: { from: [index === 0 ? "input" : `step${index - 1}`], text: "Review the batch and return {items:[{id,verdict}]}" }, kind: "peon", workType: "scan" })),
+  steps: Array.from({ length: count }, (_, index) => ({ check: "has evidence", gate, id: `step${index}`, input: { from: [index === 0 ? "input" : `step${index - 1}`], text: "Review the batch and return {items:[{id,verdict}]}" }, kind: "peon", workType: "work" })),
   version: 1,
 }, catalog));
 const peon = (docs: Record<string, { from: string }> = {}) => ({ input: { docs, text: "Return JSON" }, kind: "peon", workType: "scan" });
@@ -67,7 +67,7 @@ const drive = async (defined: DefinedComposition, fake: ReturnType<typeof fakeHo
         verdict = { items: items.slice(1) };
       }
       const hostFailed = fault === "host" && fails;
-      fake.patch(attempt.runId, { docs: { ...report.docs, [attempt.compiled.frozen.writes]: verdict }, listCostUsd: 0.1, status: hostFailed ? "failed" : "done", thinking: { line: "fixture", tokens: { cacheRead: 1, input: 2, output: 3 } }, value: hostFailed ? "work" : "done" });
+      fake.patch(attempt.runId, { docs: { ...report.docs, [attempt.compiled.frozen.writes]: verdict }, listCostUsd: 0.1, status: hostFailed ? "failed" : "done", thinking: { line: "fixture · 10 tok · done", tokens: { cacheRead: 1, input: 2, output: 3 } }, value: hostFailed ? "work" : "done" });
     }
   }
   throw new Error("did not converge");
@@ -198,13 +198,32 @@ describe("composed workflow reconcile", () => {
     expect(stateOf(defined, fake, batchesOf())).toMatchObject({ steps: { gather0: "waiting", reprove: "waiting" }, submit: [] });
   });
 
+  it("gather cost equals the generated token-price sum across every leaf and retry, ignoring host cost", async () => {
+    const usage = Arbitrary.all({ cacheRead: int(0, 100_000), cacheWrite: int(1, 100_000), input: int(0, 100_000), output: int(0, 100_000) });
+    expect(await forAll(usage, async (tokens) => {
+      const defined = definition(3);
+      const fake = fakeHost();
+      const settled = await drive(defined, fake, batchesOf(), 1, [3]);
+      for (const leaf of settled.leaves.filter(({ latest }) => latest.batch !== null)) {
+        for (const attempt of leaf.attempts) {
+          const { cacheWrite: _write, ...legacy } = tokens;
+          const total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+          fake.patch(attempt.runId, { listCostUsd: 999, thinking: { line: `model · ${total} tok · done`, tokens: attempt.attempt === 1 ? legacy : tokens } });
+        }
+      }
+      const gathered = Schema.decodeUnknownSync(Schema.Struct({ costBasis: Schema.String, leaves: Schema.Array(Schema.Struct({ costUsd: Schema.Finite })), totalCostUsd: Schema.Finite }))(stateOf(defined, fake, batchesOf()).docs["gather0.verdicts"]);
+      const expectedAttempt = (tokens.input * 2 + tokens.output * 10 + tokens.cacheRead * 0.1 + tokens.cacheWrite * 2.5) / 1_000_000;
+      return gathered.costBasis === "list-price-equivalent" && gathered.leaves.every(({ costUsd }) => costUsd === expectedAttempt * 2) && gathered.totalCostUsd === expectedAttempt * 4;
+    }, 50)).toBeUndefined();
+  });
+
   it("gathers per-item verdicts and all-attempt costs and tokens; unknown cost is not $0", async () => {
     const defined = definition(3);
     const fake = fakeHost();
     const settled = await drive(defined, fake, batchesOf(), 1, [3]);
     const result = Schema.decodeUnknownSync(Schema.Struct({ items: Schema.Array(Schema.Json), leaves: Schema.Array(Schema.Struct({ cost: Schema.Finite, tokens: Schema.Struct({ cacheRead: Schema.Finite, input: Schema.Finite, output: Schema.Finite }) })) }))(settled.docs["gather0.verdicts"]);
     expect(result.items).toHaveLength(2);
-    expect(result.leaves).toEqual(Array.from({ length: 2 }, () => ({ cost: 0.2, tokens: { cacheRead: 2, input: 4, output: 6 } })));
+    expect(result.leaves).toEqual(Array.from({ length: 2 }, () => ({ cost: 0.0000882, tokens: { cacheRead: 2, input: 4, output: 6 } })));
     const mapLeaf = settled.leaves.find(({ path }) => path === "judge0/map[0]");
     if (mapLeaf === undefined) {throw new Error("missing map leaf");}
     const old = fake.runs.get(mapLeaf.latest.runId);

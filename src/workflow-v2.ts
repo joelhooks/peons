@@ -10,7 +10,8 @@ import { DocKey, FROZEN_DOC, Frozen, INPUT_DOC, MischiefSubmission, Prompt, cano
 import type { Compiled } from "./compile.ts";
 import { RouteRefused, resolveRoute } from "./routing.ts";
 import type { Resolved } from "./routing.ts";
-import { decodeVerdict } from "./run-report.ts";
+import { decodeVerdict, verdictDocs } from "./run-report.ts";
+import { listCost } from "./list-cost.ts";
 import type { RunReport } from "./run-report.ts";
 import { DefinedWorkflow, decodeDefinedWorkflow, workflowRun } from "./workflow.ts";
 import type { WorkflowDeps } from "./workflow.ts";
@@ -220,14 +221,15 @@ const invalidVerdict = (task: BoundTask, report: RunReport): boolean => {
   const verdict = task.seed.frozen.steps[task.seed.frozen.final]?.verdict;
   if (verdict === null || verdict === undefined) {return false;}
   const raw = report.docs[task.seed.frozen.writes];
-  return raw === undefined || !decodeVerdict(verdict, raw).ok;
+  const final = task.seed.frozen.steps[task.seed.frozen.final];
+  return raw === undefined || final === undefined || !decodeVerdict(verdict, raw, verdictDocs(final, report.docs)).ok;
 };
 const valueOf = (doc: Schema.Json): Schema.Json | Prompt => {
   if (typeof doc !== "string") {return doc;}
   try {return parseJson(doc);} catch {return compositionRefused("a map or verdict doc is not JSON");}
 };
 const Item = Schema.Struct({ id: Schema.String.check(Schema.isMinLength(1)) });
-const Verdict = Schema.Struct({ items: Schema.Array(Schema.Struct({ id: Schema.String, verdict: Schema.Json })) });
+const Verdict = Schema.Struct({ items: Schema.Array(Schema.StructWithRest(Schema.Struct({ id: Schema.String, verdict: Schema.Json }), [Schema.Record(Schema.String, Schema.Json)])) });
 // A done host run is not a successful map attempt until its verdict covers its batch exactly.
 // Share this decoder with gather so retry eligibility and the final guard cannot drift apart.
 const batchVerdict = (batch: Schema.Json, raw: Schema.Json | undefined, path: string): typeof Verdict.Type | Prompt => {
@@ -246,20 +248,22 @@ const invalidBatchVerdict = (task: BoundTask, batch: Schema.Json | null, report:
   report.status === "done" && batch !== null && batchVerdict(batch, report.docs[task.seed.frozen.writes], path) instanceof Prompt;
 
 type StepStatus = Reconciled["steps"][string];
-const metrics = (leaf: Leaf, runs: Observed["runs"]): Schema.Json => {
-  let cost: number | null = 0;
-  let tokens: { cacheRead: number; input: number; output: number } | null = { cacheRead: 0, input: 0, output: 0 };
+const metrics = (leaf: Leaf, runs: Observed["runs"]) => {
+  let costUsd: number | null = 0;
+  let tokens: { cacheRead: number; cacheWrite: number; input: number; output: number } | null = { cacheRead: 0, cacheWrite: 0, input: 0, output: 0 };
   const attempts: Schema.Json[] = [];
-  for (const { runId } of leaf.attempts) {
+  const reasons: string[] = [];
+  for (const { runId, compiled } of leaf.attempts) {
     const report = runs[runId];
-    const usage = report?.thinking?.tokens;
-    const price = report?.listCostUsd;
-    cost = cost === null || price === undefined ? null : cost + price;
-    if (usage === undefined) {tokens = null;}
-    else if (tokens !== null) {tokens = { cacheRead: tokens.cacheRead + usage.cacheRead, input: tokens.input + usage.input, output: tokens.output + usage.output };}
-    attempts.push({ cost: price ?? null, runId, tokens: usage ?? null });
+    const priced = listCost(Object.values(compiled.frozen.steps).map(({ profile }) => profile.model), report?.thinking);
+    const usage = priced.tokens;
+    costUsd = costUsd === null || priced.costUsd === null ? null : costUsd + priced.costUsd;
+    if (priced.costReason !== null) {reasons.push(`${runId}: ${priced.costReason}`);}
+    if (usage === null) {tokens = null;}
+    else if (tokens !== null) {tokens = { cacheRead: tokens.cacheRead + usage.cacheRead, cacheWrite: tokens.cacheWrite + usage.cacheWrite, input: tokens.input + usage.input, output: tokens.output + usage.output };}
+    attempts.push({ ...priced, cost: priced.costUsd, runId });
   }
-  return { attempts, cost, leaf: leaf.path, tokens };
+  return { attempts, cost: costUsd, costBasis: "list-price-equivalent", costReason: reasons.length === 0 ? null : reasons.join("; "), costUsd, leaf: leaf.path, tokens };
 };
 
 const readBatches = (from: string, docs: Readonly<Record<string, Schema.Json>>): readonly Schema.Json[] | Prompt => {
@@ -328,7 +332,11 @@ export const gather = (leaves: readonly Leaf[]): Schema.Json | Prompt => {
   for (const leaf of leaves) {
     const {report} = leaf;
     if (leaf.status !== "done" || report === undefined || leaf.latest.batch === null) {return compositionRefused(`gather leaf ${leaf.path} is not done with a batch`);}
-    const decoded = batchVerdict(leaf.latest.batch, report.docs[leaf.latest.compiled.frozen.writes], leaf.path);
+    const { frozen } = leaf.latest.compiled;
+    const final = frozen.steps[frozen.final];
+    const raw = report.docs[frozen.writes];
+    if (final?.verdict !== null && final?.verdict !== undefined && (raw === undefined || !decodeVerdict(final.verdict, raw, verdictDocs(final, report.docs)).ok)) {return compositionRefused(`gather leaf ${leaf.path} has an invalid verdict`);}
+    const decoded = batchVerdict(leaf.latest.batch, raw, leaf.path);
     if (decoded instanceof Prompt) {return decoded;}
     for (const item of decoded.items) {
       if (seen.has(item.id)) {return compositionRefused(`gather repeats item ${item.id} across batches`);}
@@ -339,6 +347,12 @@ export const gather = (leaves: readonly Leaf[]): Schema.Json | Prompt => {
     costs.push({ attempts: leaf.attempts.map(({ runId }) => runId), leaf: leaf.path, runId: leaf.latest.runId });
   }
   return { items, leaves: costs };
+};
+
+const totalCost = (costs: readonly { readonly costUsd: number | null }[]): number | null => {
+  let total: number | null = 0;
+  for (const leaf of costs) {total = total === null || leaf.costUsd === null ? null : total + leaf.costUsd;}
+  return total;
 };
 
 const stepPath = (step: typeof BoundStep.Type, index: number) => step.kind === "map" ? `${step.id}/map[${index}]` : step.id;
@@ -360,7 +374,7 @@ export const reconcile = (definition: DefinedComposition, observed: Observed): R
       const gathered = gather(source);
       if (gathered instanceof Prompt) {return gathered;}
       const costs = source.map((leaf) => metrics(leaf, observed.runs));
-      docs[`${step.id}.${step.writes}`] = { ...Schema.decodeUnknownSync(Schema.Struct({ items: Schema.Array(Schema.Json) }))(gathered), leaves: costs };
+      docs[`${step.id}.${step.writes}`] = { ...Schema.decodeUnknownSync(Schema.Struct({ items: Schema.Array(Schema.Json) }))(gathered), costBasis: "list-price-equivalent", leaves: costs, totalCostUsd: totalCost(costs) };
       steps[step.id] = "done";
       continue;
     }

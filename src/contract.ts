@@ -87,6 +87,7 @@ export const Artifact = Schema.Union([
 
 export const Tokens = Schema.Struct({
   cacheRead: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  cacheWrite: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   input: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   output: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 });

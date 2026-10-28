@@ -11,8 +11,11 @@ import { Result, Schema } from "effect";
 import type { PeonRunResult as RunResult } from "./contract.ts";
 import { FROZEN_DOC, Frozen, canonical, issuesOf, sha256 } from "./compile.ts";
 import type { FrozenStep } from "./compile.ts";
-import { verdicts } from "./verdicts.ts";
-import type { ChangeReviewVerdict, InvestigationVerdict } from "./verdicts.ts";
+import { usageOf } from "./list-cost.ts";
+import { verdicts, verifyDeadCodeBatch, verifyQuotes } from "./verdicts.ts";
+import type { Verdict } from "./verdicts.ts";
+
+export type { Verdict } from "./verdicts.ts";
 
 const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 export const MischiefRunId = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,63}$/u));
@@ -49,7 +52,7 @@ export const RunReport = Schema.Struct({
   question: Schema.optionalKey(Question),
   runId: MischiefRunId,
   status: RunStatus,
-  thinking: Schema.optionalKey(Schema.Struct({ line: Schema.String, tokens: Schema.Struct({ cacheRead: Count, input: Count, output: Count }) })),
+  thinking: Schema.optionalKey(Schema.Struct({ line: Schema.String, tokens: Schema.Struct({ cacheRead: Count, cacheWrite: Schema.optionalKey(Count), input: Count, output: Count }) })),
   transitions: Count,
   value: Schema.NullOr(Schema.String),
 });
@@ -103,8 +106,10 @@ export const escalationId = (question: { readonly key: string; readonly answered
 
 // A think template's output doc, decoded with the verdict schema it names. A doc that is not JSON, or
 // does not decode, is a failed run, never a done one.
-export type Verdict = typeof ChangeReviewVerdict.Type | typeof InvestigationVerdict.Type;
-export const decodeVerdict = (name: keyof typeof verdicts, doc: Schema.Json): { readonly ok: true; readonly verdict: Verdict } | { readonly ok: false; readonly why: string } => {
+export const verdictDocs = (step: FrozenStep, docs: RunReport["docs"]): Readonly<Record<string, string>> =>
+  Object.fromEntries(Object.entries(step.cites).flatMap(([slug, key]) => docs[key] === undefined ? [] : [[slug, docText(docs[key])]]));
+
+export const decodeVerdict = (name: keyof typeof verdicts, doc: Schema.Json, docs: Readonly<Record<string, string>> = {}): { readonly ok: true; readonly verdict: Verdict } | { readonly ok: false; readonly why: string } => {
   let value: unknown = doc;
   if (typeof doc === "string") {
     try {
@@ -114,7 +119,13 @@ export const decodeVerdict = (name: keyof typeof verdicts, doc: Schema.Json): { 
     }
   }
   const decoded = Schema.decodeUnknownResult(verdicts[name], { errors: "all" })(value);
-  return Result.isFailure(decoded) ? { ok: false, why: `it does not decode as ${name}: ${issuesOf(decoded.failure)}` } : { ok: true, verdict: decoded.success };
+  if (Result.isFailure(decoded)) {return { ok: false, why: `it does not decode as ${name}: ${issuesOf(decoded.failure)}` };}
+  const verdict = decoded.success;
+  if (verdict.schema === "peons.verdict.dead-code.v1") {
+    if (!verifyDeadCodeBatch(verdict, docs.batch)) {return { ok: false, why: "verdict ids do not match the input batch 1:1" };}
+    if (verdict.items.some((item) => item.proof.some(({ source }) => source !== "evidence")) || verifyQuotes(verdict, docs).length > 0) {return { ok: false, why: "proof must quote exact substrings of the evidence doc" };}
+  }
+  return { ok: true, verdict };
 };
 
 const decodeFrozen = Schema.decodeUnknownOption(Frozen);
@@ -126,7 +137,7 @@ export const frozenOf = (report: RunReport) => {
 
 const statusCall = (runId: string) => `peon_status({ runId: ${JSON.stringify(runId)} })`;
 
-interface TokenUsage { readonly cacheRead: number; readonly input: number; readonly output: number }
+interface TokenUsage { readonly cacheRead: number; readonly cacheWrite?: number; readonly input: number; readonly output: number }
 interface Base { readonly desk: string; readonly runId: string; readonly schema: "peons.record.v1" }
 interface FourLines { readonly tag: string; readonly accepted: string; readonly fix: string; readonly debug: string }
 
@@ -160,7 +171,7 @@ const doneRecord = ({ report, request, base, frozen, final, debugAt, failed }: R
     {return failed(frozen.final, final, { accepted: `a finished run whose ${frozen.writes} doc is written`, debug: `${debugAt} finished without doc ${frozen.writes}`, fix: `call ${statusCall(request.runId)} and read which step skipped writing ${frozen.writes}`, tag: "ArtifactMissing" });}
   const checks = [];
   if (final.verdict !== null) {
-    const verdict = decodeVerdict(final.verdict, doc);
+    const verdict = decodeVerdict(final.verdict, doc, verdictDocs(final, report.docs));
     if (!verdict.ok)
       {return failed(frozen.final, final, { accepted: `a ${frozen.writes} doc that decodes as ${final.verdict}`, debug: `${debugAt} doc ${frozen.writes}: ${verdict.why}`, fix: `call peon_run with a new runId; read ${statusCall(request.runId)} first`, tag: "VerdictInvalid" });}
     checks.push({ detail: `${frozen.writes} decodes as ${final.verdict}`, name: "verdict-schema", outcome: "pass" as const });
@@ -271,7 +282,7 @@ export const fromRunReport = (input: RunReport | SubmitRefused, request: Address
   }
   const stepFor = (state: string): FrozenStep => frozen.steps[frozen.states[state] ?? ""] ?? final;
   const tokens = report.thinking?.tokens ?? { cacheRead: 0, input: 0, output: 0 };
-  const usage = { cacheRead: tokens.cacheRead, input: tokens.input, output: tokens.output };
+  const usage = usageOf(report.thinking) ?? { ...tokens, cacheWrite: tokens.cacheWrite ?? 0 };
   const debugAt = `inspectRun({ runId: ${JSON.stringify(report.runId)} })`;
   const failed = (step: string, frozenStep: FrozenStep, four: FourLines): PeonRunResult => ({
     ...base,

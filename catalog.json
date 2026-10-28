@@ -332,6 +332,31 @@
         "repoCount": 2,
         "source": "peon-swarm-2 rank 12 (slices reader 1)"
       }
+    },
+    {
+      "template": "dead-code-judge",
+      "version": 1,
+      "kind": "judge",
+      "summary": "Judge a dead-code batch from exact grep evidence, including dynamic callers and own-file use.",
+      "owner": "agent-graph/desk",
+      "input": "JSON batch of {id} items (path#name), Knacker grep evidence, and optional desk-specific rules.",
+      "output": "peons.verdict.dead-code.v1: one evidence-quoted dead/live/drop-export/unsure verdict per id, confidence and exclusive test files.",
+      "verify": "Validate 1:1 batch ids and exact evidence substrings. Missing caller coverage means unsure.",
+      "needs": [
+        "model-only"
+      ],
+      "model": "opus",
+      "thinking": "medium",
+      "refusals": [
+        "Refuse malformed batches or unsupported proof quotes.",
+        "Never edit, send, push or deploy. Inconclusive evidence is unsure, not a failed run."
+      ],
+      "cellReady": true,
+      "evidence": {
+        "count": 15,
+        "repoCount": 1,
+        "source": "swarm drovr-dead-code-a1 2026-10-27, 15 runs, 1015 items"
+      }
     }
   ]
 }

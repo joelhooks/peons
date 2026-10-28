@@ -16,7 +16,7 @@ const Slug = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,47}$/u));
 const DocName = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_-]{0,63}$/u));
 const RelPath = Schema.String.check(Schema.isPattern(/^(?!\/)(?!.*\.\.)[A-Za-z0-9._/-]+$/u));
 
-export const ThinkModel = Schema.Literals(["sol", "gpt-6-luna"]);
+export const ThinkModel = Schema.Literals(["sol", "gpt-6-luna", "opus"]);
 
 export const ThinkTemplate = Schema.Struct({
   inputs: Schema.NonEmptyArray(

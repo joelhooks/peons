@@ -1,0 +1,44 @@
+{
+  "schema": "peons.think-template.v1",
+  "template": "dead-code-judge",
+  "version": 1,
+  "kind": "judge",
+  "owner": "agent-graph/desk",
+  "profile": {
+    "model": "opus",
+    "thinking": "medium"
+  },
+  "warmup": [
+    {
+      "doc": "rubric",
+      "path": "warmup.md",
+      "sha256": "8c896e1709e6a6e5a43ec0e090e85da5fb38158b5771c70f1ffaf694de1af65d"
+    }
+  ],
+  "prompt": {
+    "path": "prompt.md",
+    "sha256": "e58bcc032a76ca5a6f4bea18c5998a133d9aa7751e1e098125fb8dcd356dbff3"
+  },
+  "inputs": [
+    {
+      "doc": "batch",
+      "required": true,
+      "maxBytes": 40000
+    },
+    {
+      "doc": "evidence",
+      "required": true,
+      "maxBytes": 60000
+    },
+    {
+      "doc": "rules",
+      "required": false,
+      "maxBytes": 8000
+    }
+  ],
+  "output": {
+    "doc": "verdict",
+    "verdict": "peons.verdict.dead-code.v1"
+  },
+  "maxSteps": 4
+}
