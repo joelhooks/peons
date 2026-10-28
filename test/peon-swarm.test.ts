@@ -83,6 +83,27 @@ describe("peon_swarm", () => {
     const reused = await run(tools.peon_swarm({ jobs: [job("docs", 0)], swarmId: "drovr-a" }));
     expect(reused.text.split("\n")[0]).toMatch(/^SwarmRefused:/u);
   });
+
+  it("refuses a swarmId rerun whose jobs keep their run ids but change content, and starts nothing new", async () => {
+    const fake = fakeHost();
+    const { files } = memoryFiles();
+    const tools = toolsWith(fake.host, files);
+    const jobs = [job("ask-template", 0), job("scan", 1)];
+    const first = await run(tools.peon_swarm({ jobs, swarmId: "slices" }));
+    expect(first.isError).toBe(false);
+    const submitted = fake.calls.submit.length;
+    const edited = [{ ...job("ask-template", 0), docs: { evidence: "re-sliced evidence" } }, job("scan", 1)];
+    const rerun = await run(tools.peon_swarm({ jobs: edited, swarmId: "slices" }));
+    expect(rerun.text.split("\n")[0]).toMatch(/^SwarmRefused:/u);
+    expect(fake.calls.submit).toHaveLength(submitted);
+  });
+
+  it("refuses two jobs that name the same runId", async () => {
+    const fake = fakeHost();
+    const out = await run(toolsWith(fake.host).peon_swarm({ jobs: [{ ...job("scan", 0), runId: "same" }, { ...job("work", 1), runId: "same" }] }));
+    expect(out.text.split("\n")[0]).toMatch(/^SwarmRefused:/u);
+    expect(fake.calls.submit).toHaveLength(0);
+  });
 });
 
 describe("onGateway", () => {
