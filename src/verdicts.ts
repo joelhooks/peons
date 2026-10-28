@@ -52,6 +52,16 @@ export const verifyDeadCodeBatch = (verdict: typeof DeadCodeVerdict.Type, batch:
   return new Set(expected).size === expected.length && new Set(actual).size === actual.length && expected.length === actual.length && actual.every((id) => expected.includes(id));
 };
 
+// A destructive recommendation needs at least one quote tied to this item. Other exact quotes
+// may add context; dynamic-load evidence may name only the path, not the symbol.
+export const verifyDeadCodeProof = (verdict: typeof DeadCodeVerdict.Type): boolean => verdict.items.every((item) => {
+  if (item.verdict !== "dead" && item.verdict !== "drop-export") {return true;}
+  const separator = item.id.indexOf("#");
+  const path = item.id.slice(0, separator);
+  const symbol = item.id.slice(separator + 1);
+  return item.proof.some(({ quote }) => quote.includes(path) || quote.includes(symbol));
+});
+
 export const verdicts = {
   "peons.verdict.change-review.v1": ChangeReviewVerdict,
   "peons.verdict.dead-code.v1": DeadCodeVerdict,

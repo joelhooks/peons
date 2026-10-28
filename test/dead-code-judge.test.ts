@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect";
+import * as Arbitrary from "effect/Arbitrary";
 import { describe, expect, it } from "vitest";
 
 import { Prompt, compileRun } from "../src/compile.ts";
@@ -7,7 +8,7 @@ import { decodeVerdict, fromRunReport } from "../src/run-report.ts";
 import { compile, loadTemplate } from "../src/think-template.ts";
 import { quotesOf, verifyQuotes } from "../src/verdicts.ts";
 import { defineComposition, gather, reconcile } from "../src/workflow-v2.ts";
-import { DESK, catalog, fakeHost } from "./support.ts";
+import { DESK, catalog, fakeHost, forAll, int } from "./support.ts";
 
 const template = loadTemplate(new URL("../templates/dead-code-judge/v1", import.meta.url).pathname);
 const batch = [{ id: "src/a.ts#used" }, { id: "scripts/a.ts#unused" }];
@@ -46,6 +47,26 @@ describe("dead-code-judge@1", () => {
     expect(decodeVerdict(name, { ...verdict, items: verdict.items.map((item) => ({ ...item, proof: [{ quote: docs.batch, source: "batch" }] })) }, docs).ok).toBe(false);
   });
 
+  it("generated destructive verdicts refuse unrelated quotes and accept a path or symbol quote for the same item", async () => {
+    expect(await forAll(Arbitrary.all({ count: int(1, 5), serial: int(0, 100_000) }), ({ count, serial }) => {
+      const generatedBatch = Array.from({ length: count }, (_, index) => ({ id: `src/file${serial}-${index}.ts#symbol${serial}_${index}` }));
+      const generatedEvidence = `e\n${generatedBatch.map(({ id }) => id.replace("#", "\n")).join("\n")}`;
+      const inputDocs = { batch: JSON.stringify(generatedBatch), evidence: generatedEvidence };
+      for (const label of ["dead", "drop-export", "live", "unsure"]) {
+        const items = generatedBatch.map(({ id }) => ({ confidence: "high", id, proof: [{ quote: "e", source: "evidence" }], testFilesCoveringOnlyIt: [], verdict: label }));
+        const destructive = label === "dead" || label === "drop-export";
+        if (decodeVerdict(name, { items, schema: name }, inputDocs).ok === destructive) {return false;}
+        const linkedItems = items.map((item) => ({ ...item, proof: [...item.proof, { quote: item.id.split("#")[0] ?? "", source: "evidence" }] }));
+        if (!decodeVerdict(name, { items: linkedItems, schema: name }, inputDocs).ok) {return false;}
+        const symbolItems = items.map((item) => ({ ...item, proof: [...item.proof, { quote: item.id.split("#")[1] ?? "", source: "evidence" }] }));
+        if (!decodeVerdict(name, { items: symbolItems, schema: name }, inputDocs).ok) {return false;}
+        // A linked quote on other items must not cover the one that still lacks a link.
+        if (destructive && decodeVerdict(name, { items: linkedItems.map((item, index) => index === count - 1 ? { ...item, proof: [{ quote: "e", source: "evidence" }] } : item), schema: name }, inputDocs).ok) {return false;}
+      }
+      return true;
+    }, 200)).toBeUndefined();
+  });
+
   it("refuses missing, duplicate, foreign, malformed ids and missing proof in its own leaf", async () => {
     const compiled = unwrap(compileRun(request, null, template));
     const host = fakeHost();
@@ -58,6 +79,39 @@ describe("dead-code-judge@1", () => {
       expect(fromRunReport(observed, request)).toMatchObject({ tag: "VerdictInvalid", type: "peon.failed" });
     }
     expect(fromRunReport({ ...report, docs: { ...report.docs, [compiled.frozen.writes]: verdict }, status: "done", value: "done" }, request)).toMatchObject({ type: "peon.done" });
+  });
+
+  it.each([
+    ["dead", true], ["drop-export", true], ["dead", false], ["drop-export", false],
+  ] as const)("retries weak %s proof and respects the cap (repair: %s)", async (label, repair) => {
+    const deps = { ...catalog, think: [...catalog.think, template] };
+    const defined = unwrap(defineComposition({ desk: DESK, id: "weak-proof", retryCap: 2, schema: "peons.workflow.v2", steps: [
+      { id: "judge", kind: "map", over: { from: "input.batches" }, task: { input: { docs: { batch: { from: "batch" }, evidence: { from: "input.evidence" } }, text: "Judge batch" }, kind: "peon", template: "dead-code-judge@1" } },
+      { from: "judge", id: "gather", kind: "gather", writes: "verdicts" },
+    ], version: 1 }, deps));
+    const fake = fakeHost();
+    const input = { batches: [batch], evidence };
+    const state = () => unwrap(reconcile(defined, { input, runs: Object.fromEntries([...fake.runs].map(([id, entry]) => [id, entry.report])) }));
+    for (const attemptNumber of [1, 2]) {
+      const [attempt] = state().submit;
+      if (attempt === undefined) {throw new Error("missing retry for weak proof");}
+      expect(attempt.attempt).toBe(attemptNumber);
+      // oxlint-disable-next-line no-await-in-loop
+      await Effect.runPromise(fake.host.submit(attempt.runId, attempt.compiled.plan, attempt.compiled.docs));
+      const report = fake.runs.get(attempt.runId)?.report;
+      if (report === undefined) {throw new Error("missing report");}
+      const output = { ...verdict, items: verdict.items.map((item) => ({ ...item, proof: [{ quote: repair && attemptNumber === 2 ? item.id.split("#")[0] ?? "" : "e", source: "evidence" }], verdict: label })) };
+      const updated = { ...report, docs: { ...report.docs, [attempt.compiled.frozen.writes]: output }, status: "done" as const, value: "done" };
+      fake.patch(attempt.runId, updated);
+      expect(fromRunReport(updated, { desk: DESK, runId: attempt.compiled.frozen.runId })).toMatchObject(repair && attemptNumber === 2 ? { type: "peon.done" } : { tag: "VerdictInvalid", type: "peon.failed" });
+      if (attemptNumber === 1) {
+        const [leaf] = state().leaves;
+        if (leaf === undefined) {throw new Error("missing leaf");}
+        expect(gather([{ ...leaf, latest: attempt, report: updated, status: "done" }])).toBeInstanceOf(Prompt);
+      }
+    }
+    expect(state()).toMatchObject({ status: repair ? "done" : "failed", submit: [] });
+    expect(fake.calls.submit).toHaveLength(2);
   });
 
   it("retries fabricated quotes and gathers full proof/confidence/test-file fields after a valid retry", async () => {
