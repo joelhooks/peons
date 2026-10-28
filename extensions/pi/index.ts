@@ -19,7 +19,23 @@ import type { RunHostPort } from "./host.ts";
 import { makeTools } from "./tools.ts";
 import type { Files, ToolOutput } from "./tools.ts";
 
-const PEON_TOOLS = ["peon_catalog", "peon_run", "peon_status", "peon_answer", "peon_verify", "workflow_define", "workflow_run"];
+const Input = {
+  brief: Type.Optional(Type.String({ description: "The request in plain words. Never include secrets." })),
+  docs: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Named docs for the brief, by slug. A think template takes exactly its declared inputs; peon_catalog lists them" })),
+  event: Type.Optional(Type.Object({ data: Type.Unknown(), name: Type.String() }, { description: "An event instead of a brief" })),
+};
+
+const RunJob = Type.Object({
+  peon: Type.Optional(Type.String({ description: "A runnable catalog template, like change-review@1" })),
+  workType: Type.Optional(Type.String({ description: "A work-type concept, like research or bugfix" })),
+  ...Input,
+  base: Type.Optional(Type.Object({ repo: Type.String(), sha: Type.String() })),
+  model: Type.Optional(Type.Union([Type.Literal("sol"), Type.Literal("luna"), Type.Literal("opus")], { description: "Override the route's model on a workType job" })),
+  runId: Type.Optional(Type.String({ description: "Idempotency key. Default: a digest of the request" })),
+  scope: Type.Optional(Type.Array(Type.String())),
+});
+
+const PEON_TOOLS = ["peon_catalog", "peon_run", "peon_swarm", "peon_status", "peon_answer", "peon_verify", "workflow_define", "workflow_run"];
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const DEBUG = "read extensions/pi/index.ts in joelhooks/peons";
@@ -82,11 +98,6 @@ export default function peons(pi: ExtensionAPI) {
     return { content: [{ text: out.text, type: "text" as const }], details: out.data, isError: out.isError };
   };
 
-  const Input = {
-    brief: Type.Optional(Type.String({ description: "The request in plain words. Never include secrets." })),
-    docs: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Named docs for the brief, by slug. A think template takes exactly its declared inputs; peon_catalog lists them" })),
-    event: Type.Optional(Type.Object({ data: Type.Unknown(), name: Type.String() }, { description: "An event instead of a brief" })),
-  };
 
   pi.registerTool({
     annotations: { openWorldHint: false, readOnlyHint: true },
@@ -103,15 +114,20 @@ export default function peons(pi: ExtensionAPI) {
     execute: execute("peon_run"),
     label: "Peon run",
     name: "peon_run",
-    parameters: Type.Object({
-      peon: Type.Optional(Type.String({ description: "A runnable catalog template, like change-review@1" })),
-      workType: Type.Optional(Type.String({ description: "A work-type concept, like research or bugfix" })),
-      ...Input,
-      base: Type.Optional(Type.Object({ repo: Type.String(), sha: Type.String() })),
-      runId: Type.Optional(Type.String({ description: "Idempotency key. Default: a digest of the request" })),
-      scope: Type.Optional(Type.Array(Type.String())),
-    }),
+    parameters: RunJob,
     promptSnippet: "peon_run: run a cheap peon for a work type or template, idempotent on runId",
+  });
+  pi.registerTool({
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true, readOnlyHint: false },
+    description: "Start up to 64 peons at once, each job shaped like peon_run. Every job is checked first; if any is refused, none starts and each refusal is listed. Run ids are <swarmId>-<index>, so calling again with the same jobs starts nothing twice. Watch with peon_status({ swarmId }).",
+    execute: execute("peon_swarm"),
+    label: "Peon swarm",
+    name: "peon_swarm",
+    parameters: Type.Object({
+      jobs: Type.Array(RunJob, { maxItems: 64, minItems: 1 }),
+      swarmId: Type.Optional(Type.String({ description: "Lowercase id, like drovr-dead-code-a. Default: a digest of the jobs" })),
+    }),
+    promptSnippet: "peon_swarm: start many peons all-or-none, then watch peon_status({ swarmId })",
   });
   pi.registerTool({
     annotations: { openWorldHint: true, readOnlyHint: true },
@@ -119,7 +135,7 @@ export default function peons(pi: ExtensionAPI) {
     execute: execute("peon_status"),
     label: "Peon status",
     name: "peon_status",
-    parameters: Type.Object({ runId: Type.String() }),
+    parameters: Type.Union([Type.Object({ runId: Type.String() }), Type.Object({ swarmId: Type.String() })]),
   });
   pi.registerTool({
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true, readOnlyHint: false },
