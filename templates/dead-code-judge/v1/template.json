@@ -12,12 +12,12 @@
     {
       "doc": "rubric",
       "path": "warmup.md",
-      "sha256": "8c896e1709e6a6e5a43ec0e090e85da5fb38158b5771c70f1ffaf694de1af65d"
+      "sha256": "211cc6b5e32d4c9451e5c27cd27fe0ec85cc9450b5f9e445a24132462cc8e490"
     }
   ],
   "prompt": {
     "path": "prompt.md",
-    "sha256": "e58bcc032a76ca5a6f4bea18c5998a133d9aa7751e1e098125fb8dcd356dbff3"
+    "sha256": "72bd1891be0d610f39f55766fc5a02fda33ab2e4b851cd5d817ea4a83cea45c7"
   },
   "inputs": [
     {

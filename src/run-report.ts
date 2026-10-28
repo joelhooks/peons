@@ -12,7 +12,7 @@ import type { PeonRunResult as RunResult } from "./contract.ts";
 import { FROZEN_DOC, Frozen, canonical, issuesOf, sha256 } from "./compile.ts";
 import type { FrozenStep } from "./compile.ts";
 import { usageOf } from "./list-cost.ts";
-import { verdicts, verifyDeadCodeBatch, verifyQuotes } from "./verdicts.ts";
+import { verdicts, verifyDeadCodeBatch, verifyDeadCodeProof, verifyQuotes } from "./verdicts.ts";
 import type { Verdict } from "./verdicts.ts";
 
 export type { Verdict } from "./verdicts.ts";
@@ -123,6 +123,7 @@ export const decodeVerdict = (name: keyof typeof verdicts, doc: Schema.Json, doc
   const verdict = decoded.success;
   if (verdict.schema === "peons.verdict.dead-code.v1") {
     if (!verifyDeadCodeBatch(verdict, docs.batch)) {return { ok: false, why: "verdict ids do not match the input batch 1:1" };}
+    if (!verifyDeadCodeProof(verdict)) {return { ok: false, why: "each dead or drop-export item needs a proof quote containing its symbol or file path" };}
     if (verdict.items.some((item) => item.proof.some(({ source }) => source !== "evidence")) || verifyQuotes(verdict, docs).length > 0) {return { ok: false, why: "proof must quote exact substrings of the evidence doc" };}
   }
   return { ok: true, verdict };

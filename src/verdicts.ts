@@ -30,7 +30,7 @@ export const InvestigationVerdict = Schema.Struct({
 export const DeadCodeVerdict = Schema.Struct({
   items: Schema.Array(Schema.Struct({
     confidence: Schema.Literals(["high", "medium", "low"]),
-    id: NonEmpty.check(Schema.isPattern(/^[^#]+#[^#]+$/u)),
+    id: NonEmpty.check(Schema.isPattern(/^(?:[^#]+(?:#[^#]*)?|#[^#]+)$/u)),
     proof: Schema.NonEmptyArray(Evidence),
     testFilesCoveringOnlyIt: Schema.Array(NonEmpty),
     verdict: Schema.Literals(["dead", "live", "drop-export", "unsure"]),
@@ -51,6 +51,16 @@ export const verifyDeadCodeBatch = (verdict: typeof DeadCodeVerdict.Type, batch:
   const actual = verdict.items.map(({ id }) => id);
   return new Set(expected).size === expected.length && new Set(actual).size === actual.length && expected.length === actual.length && actual.every((id) => expected.includes(id));
 };
+
+// A destructive recommendation needs at least one quote tied to this item. Other exact quotes
+// may add context; dynamic-load evidence may name only the path, not the symbol.
+export const verifyDeadCodeProof = (verdict: typeof DeadCodeVerdict.Type): boolean => verdict.items.every((item) => {
+  if (item.verdict !== "dead" && item.verdict !== "drop-export") {return true;}
+  const separator = item.id.indexOf("#");
+  const path = separator === -1 ? item.id : item.id.slice(0, separator);
+  const symbol = separator === -1 ? "" : item.id.slice(separator + 1);
+  return item.proof.some(({ quote }) => (path.length > 0 && quote.includes(path)) || (symbol.length > 0 && quote.includes(symbol)));
+});
 
 export const verdicts = {
   "peons.verdict.change-review.v1": ChangeReviewVerdict,
