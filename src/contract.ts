@@ -40,6 +40,13 @@ export const Base = Schema.Struct({
   sha: GitSha,
 });
 
+export const WORKSPACE_TOOLS = ["read", "grep", "find", "ls", "bash"] as const;
+
+export const Checkout = Schema.Struct({
+  repo: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u)),
+  sha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/u)),
+});
+
 export const Target = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("template"), template: Slug, version: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))) }),
   Schema.Struct({ kind: Schema.Literal("work-type"), workType: Concept }),
@@ -59,6 +66,7 @@ export const Route = Schema.Struct({
 
 export const PeonRequest = Schema.Struct({
   base: Schema.NullOr(Base),
+  checkout: Schema.optionalKey(Checkout),
   desk: DeskName,
   input: Schema.Union([Brief, Event]),
   runId: RunId,
