@@ -3,7 +3,7 @@ import * as Arbitrary from "effect/Arbitrary";
 import { describe, expect, it } from "vitest";
 
 import { makeTools } from "../extensions/pi/tools.ts";
-import { checkSubmission } from "../src/compile.ts";
+import { checkSubmission, withCheckout } from "../src/compile.ts";
 import type { MischiefSubmission, StateNode, ThinkStep } from "../src/compile.ts";
 import { WORKSPACE_TOOLS } from "../src/contract.ts";
 import { DESK, catalog, fakeHost, forAll, memoryFiles, run } from "./support.ts";
@@ -80,5 +80,15 @@ describe("checkout", () => {
     expect(checkSubmission(plan, []).join(" ")).toContain("need agent.workspace");
     const partial = { ...plan, defaults: { agent: { model: "sol", workspace: checkouts.good } } };
     expect(checkSubmission(partial, []).join(" ")).toContain("grants exactly");
+  });
+
+  it("refuses a checkout plan whose think step sets its own tools, so a template cannot drop the shell tools silently", () => {
+    const own: MischiefSubmission = {
+      defaults: { agent: { model: "sol" } },
+      envelope: { maxAgents: 1, maxDepth: 1, maxSteps: 4, maxThinking: "low", models: ["sol"], names: [], thresholds: { judge: 0.8 } },
+      id: "p",
+      machine: { id: "p", initial: "work", states: { done: { type: "final" }, work: { meta: { step: { agent: { tools: ["plan-docs.read"] }, kind: "think", prompt: "go" } }, on: { done: { target: "done" } } } } },
+    };
+    expect(checkSubmission(withCheckout(own, checkouts.good), []).join(" ")).toContain("grants exactly");
   });
 });

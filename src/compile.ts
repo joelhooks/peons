@@ -525,7 +525,7 @@ export const compileThink = (request: PeonRequest, resolved: Resolved | null, lo
 };
 
 const workspaceNote = ({ repo, sha }: typeof Checkout.Type) =>
-  `\n\nWorkspace: a read-only checkout of ${repo} at ${sha} is mounted at /work, with no .git and no node_modules. Use read, grep, find, ls and bash there; nothing you write under /work is kept.`;
+  `\n\nWorkspace: a read-only checkout of ${repo} at ${sha} is mounted at /work, with no .git and no node_modules. Use read, grep, find, ls and bash there. /work is read-only; use /tmp (256 MB, discarded) for scratch.`;
 
 const thinkWithWorkspace = (states: MischiefSubmission["machine"]["states"], checkout: typeof Checkout.Type): MischiefSubmission["machine"]["states"] =>
   Object.fromEntries(Object.entries(states).map(([name, node]): [string, StateNode] => {
