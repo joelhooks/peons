@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 
 import { Result, Schema, SchemaIssue } from "effect";
 
-import { PeonRefused, PeonRequest, Profile, Route as RecordRoute, TemplateRef } from "./contract.ts";
+import { Checkout, PeonRefused, PeonRequest, Profile, Route as RecordRoute, TemplateRef, WORKSPACE_TOOLS } from "./contract.ts";
 import type { Resolved } from "./routing.ts";
 import { routeRecord } from "./routing.ts";
 import { byKey, compile as compileTemplate, mischiefRunId } from "./think-template.ts";
@@ -109,6 +109,7 @@ export const AgentConfig = Schema.Struct({
   skills: Schema.optionalKey(Schema.Array(ToolName)),
   thinking: Schema.optionalKey(Thinking),
   tools: Schema.optionalKey(Schema.Array(ToolName)),
+  workspace: Schema.optionalKey(Checkout),
 });
 export const ThinkStep = Schema.Struct({
   agent: Schema.optionalKey(AgentConfig),
@@ -221,6 +222,14 @@ const targets = ({ on, siblings, where }: Placed) =>
   Object.entries(on ?? {}).filter(([, { target }]) => !siblings.includes(target)).map(([event, { target }]) => `${where}: on.${event} targets "${target}", which is not a sibling state`);
 
 type Refs = (where: string, names: readonly string[]) => string[];
+
+const SHELL_TOOLS: readonly string[] = WORKSPACE_TOOLS;
+const workspaceErrors = (where: string, agent: typeof AgentConfig.Type): string[] => {
+  const shell = (agent.tools ?? []).filter((tool) => SHELL_TOOLS.includes(tool));
+  if (agent.workspace === undefined) {return shell.length === 0 ? [] : [`${where}: shell tools (${shell.join(", ")}) need agent.workspace, a read-only checkout`];}
+  const exact = agent.tools !== undefined && agent.tools.length === SHELL_TOOLS.length && SHELL_TOOLS.every((tool) => agent.tools?.includes(tool) === true);
+  return exact ? [] : [`${where}: agent.workspace grants exactly ${SHELL_TOOLS.join(", ")}`];
+};
 type StepOf<K extends MischiefStep["kind"]> = Extract<MischiefStep, { kind: K }>;
 
 const thinkErrors = (plan: MischiefSubmission, step: StepOf<"think">, { on, where }: Placed, refs: Refs): string[] => {
@@ -234,6 +243,7 @@ const thinkErrors = (plan: MischiefSubmission, step: StepOf<"think">, { on, wher
     ...outside(where, "tool", agent.tools ?? [], [...BASE_TOOLS, ...(envelope.tools ?? [])]),
     ...outside(where, "skill", agent.skills ?? [], envelope.skills ?? []),
     ...outside(where, "extension", agent.extensions ?? [], envelope.extensions ?? []),
+    ...workspaceErrors(where, agent),
     ...(step.ephemeral !== undefined || step.post !== undefined ? [`${where}: ephemeral and post need step kind "call", which is off`] : []),
     ...refs(where, docRefs(step.prompt)),
   ];
@@ -514,9 +524,38 @@ export const compileThink = (request: PeonRequest, resolved: Resolved | null, lo
   return { docs: sorted({ ...compiled.docs, [FROZEN_DOC]: frozenDoc(frozen) }), frozen, plan, runId: compiled.runId };
 };
 
-// One compiler per shape: {profile} routes here, templates through think-template.ts.
-export const compileRun = (request: PeonRequest, resolved: Resolved | null, loaded: LoadedTemplate | null): Compiled | Prompt => {
+const workspaceNote = ({ repo, sha }: typeof Checkout.Type) =>
+  `\n\nWorkspace: a read-only checkout of ${repo} at ${sha} is mounted at /work, with no .git and no node_modules. Use read, grep, find, ls and bash there. /work is read-only; use /tmp (256 MB, discarded) for scratch.`;
+
+const thinkWithWorkspace = (states: MischiefSubmission["machine"]["states"], checkout: typeof Checkout.Type): MischiefSubmission["machine"]["states"] =>
+  Object.fromEntries(Object.entries(states).map(([name, node]): [string, StateNode] => {
+    if (isFinal(node)) {return [name, node];}
+    if (isCompound(node)) {return [name, { ...node, states: thinkWithWorkspace(node.states, checkout) }];}
+    const { step } = node.meta;
+    return [name, step.kind === "think" ? { ...node, meta: { ...node.meta, step: { ...step, prompt: `${step.prompt}${workspaceNote(checkout)}` } } } : node];
+  }));
+
+// A checkout turns every think step into a peon in a read-only container at the pinned sha, with the fixed shell tools.
+export const withCheckout = (plan: MischiefSubmission, checkout: typeof Checkout.Type): MischiefSubmission => ({
+  ...plan,
+  defaults: { ...plan.defaults, agent: { ...plan.defaults.agent, tools: [...WORKSPACE_TOOLS], workspace: checkout } },
+  envelope: { ...plan.envelope, tools: [...new Set([...(plan.envelope.tools ?? []), ...WORKSPACE_TOOLS])] },
+  machine: { ...plan.machine, states: thinkWithWorkspace(plan.machine.states, checkout) },
+});
+
+const compileBare = (request: PeonRequest, resolved: Resolved | null, loaded: LoadedTemplate | null): Compiled | Prompt => {
   if (loaded !== null) {return compileThink(request, resolved, loaded);}
   if (resolved === null) {return compileRefused("the request resolves to neither a template nor a route", "a template, or a work type with a route", "resolve the work type with resolveRoute first");}
   return compilePeonPlan(request, resolved);
+};
+
+// One compiler per shape: {profile} routes here, templates through think-template.ts; a checkout wraps either.
+export const compileRun = (request: PeonRequest, resolved: Resolved | null, loaded: LoadedTemplate | null): Compiled | Prompt => {
+  const compiled = compileBare(request, resolved, loaded);
+  if (compiled instanceof Prompt || request.checkout === undefined) {return compiled;}
+  const plan = withCheckout(compiled.plan, request.checkout);
+  const errors = checkSubmission(plan, Object.keys(compiled.docs));
+  return errors.length > 0
+    ? compileRefused(`the checkout plan fails Mischief's checks: ${errors.slice(0, 3).join("; ")}`, "a plan whose think steps take the workspace tools", "read withCheckout in src/compile.ts")
+    : { ...compiled, plan };
 };

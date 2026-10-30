@@ -10,7 +10,7 @@ import nodePath from "node:path";
 
 import { Effect, Option, Result, Schema } from "effect";
 
-import { PeonRequest, Check } from "../../src/contract.ts";
+import { Check, Checkout, PeonRequest } from "../../src/contract.ts";
 import { FROZEN_DOC, GATEWAY_MODELS, Prompt, canonical, compileRun, findThink, issuesOf, mischiefRunId, nameOf, prompt, sha256, thinkNames } from "../../src/compile.ts";
 import type { Compiled, FrozenStep } from "../../src/compile.ts";
 import { RouteRefused, resolveRoute } from "../../src/routing.ts";
@@ -43,6 +43,7 @@ export interface ToolDeps {
   readonly catalog: Catalog;
   readonly files: Files;
   readonly cwd: string;
+  readonly checkout?: boolean;
 }
 
 const DEBUG = "read extensions/pi/tools.ts in joelhooks/peons";
@@ -119,10 +120,11 @@ const finish = (tool: string) => (effect: Effect.Effect<ToolOutput, Prompt | { r
     }),
   );
 
-const RUN_SHAPE = '{ workType: "<concept>" | peon: "<template>[@<version>]", brief: "<text>", docs?: { <slug>: "<text>" } | event: { name, data }, base?: { repo, sha }, scope?: ["<path>"], runId?: "<id>" }';
+const RUN_SHAPE = '{ workType: "<concept>" | peon: "<template>[@<version>]", brief: "<text>", docs?: { <slug>: "<text>" } | event: { name, data }, base?: { repo, sha }, checkout?: { repo: "<owner/repo>", sha: "<40 hex>" }, scope?: ["<path>"], runId?: "<id>" }';
 const RunParams = Schema.Struct({
   base: Schema.optionalKey(Schema.Struct({ repo: Schema.String, sha: Schema.String })),
   brief: Schema.optionalKey(Schema.String),
+  checkout: Schema.optionalKey(Schema.Struct({ repo: Schema.String, sha: Schema.String })),
   docs: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   event: Schema.optionalKey(Schema.Struct({ data: Schema.Json, name: Schema.String })),
   model: Schema.optionalKey(Schema.Literals(SWARM_MODELS)),
@@ -181,6 +183,17 @@ const inputOf = (tool: string, given: { readonly brief?: string; readonly docs?:
   (given.brief === undefined) === (given.event === undefined)
     ? Effect.fail(prompt({ accepted: INPUT_SHAPE, debug: DEBUG, did: `called ${tool}`, fix: `call ${tool} with exactly one of brief or event`, tag: "ParamsRefused", why: `it got ${given.brief === undefined ? "neither" : "both"} a brief and an event` }))
     : Effect.succeed(given.event === undefined ? { docs: given.docs ?? {}, kind: "brief", text: given.brief ?? "" } : { data: given.event.data, kind: "event", name: given.event.name });
+
+const CHECKOUT_SHAPE = '{ repo: "<owner/repo>", sha: "<40 lowercase hex>" }';
+const checkoutOf = (tool: string, checkout: { readonly repo: string; readonly sha: string }, enabled: boolean) => {
+  if (!enabled) {return Effect.fail(prompt({ accepted: "a job without checkout while PEONS_CHECKOUT is off", debug: DEBUG, did: `called ${tool} with checkout ${checkout.repo}@${checkout.sha}`, fix: `drop checkout, or export PEONS_CHECKOUT=on once the Mischief host runs MISCHIEF_WORKSPACE=on, /reload, and call ${tool} again`, tag: "ParamsRefused", why: "checkout runs each peon in a read-only container on the Mischief host, and this desk has PEONS_CHECKOUT off" }));}
+  const { repo, sha }: { readonly repo: string; readonly sha: string } = checkout;
+  const bad = [
+    ...(Schema.is(Checkout.fields.repo)(repo) ? [] : [`checkout.repo ${JSON.stringify(repo)} is not owner/repo`]),
+    ...(Schema.is(Checkout.fields.sha)(sha) ? [] : [`checkout.sha ${JSON.stringify(sha)} is not 40 lowercase hex characters`]),
+  ];
+  return bad.length === 0 ? Effect.void : Effect.fail(prompt({ accepted: CHECKOUT_SHAPE, debug: DEBUG, did: `called ${tool} with checkout`, fix: `pin the full commit sha (git rev-parse <ref>) and call ${tool} again`, tag: "ParamsRefused", why: bad.join("; ") }));
+};
 
 const decodeRequest = (tool: string, candidate: unknown) => {
   const decoded = Schema.decodeUnknownResult(PeonRequest, { errors: "all", onExcessProperty: "error" })(candidate);
@@ -301,9 +314,10 @@ export const makeTools = (deps: ToolDeps) => {
       if ((given.workType === undefined) === (given.peon === undefined))
         {return yield* prompt({ accepted: RUN_SHAPE, debug: DEBUG, did: `called ${tool}`, fix: `call ${tool} with exactly one of workType or peon, like { workType: "research", brief }`, tag: "ParamsRefused", why: `it got ${given.workType === undefined ? "neither" : "both"}` });}
       const input = yield* inputOf(tool, given);
+      if (given.checkout !== undefined) {yield* checkoutOf(tool, given.checkout, deps.checkout === true);}
       const [name, version] = (given.peon ?? "").split("@");
       const target = given.workType === undefined ? { kind: "template", template: name, version: version === undefined ? null : Number(version) } : { kind: "work-type", workType: given.workType };
-      const content = { base: given.base ?? null, input, scope: given.scope ?? [], target };
+      const content = { base: given.base ?? null, ...(given.checkout === undefined ? {} : { checkout: given.checkout }), input, scope: given.scope ?? [], target };
       const runId = given.runId ?? defaultRunId(content);
       const request = yield* decodeRequest(tool, { desk, runId, schema: "peons.request.v1", ...content });
       const refusedAs = (template: string, route: FrozenStep["route"], refused: Prompt) => ({ refused: output(refusedRecord(request, template, route, refused)) });

@@ -84,7 +84,7 @@ export default function peons(pi: ExtensionAPI) {
         host = liveRunHost({ audience: env.audience, endpoint: env.endpoint, fetch, signer: leasedSigner(env.secretName) });
         return Effect.succeed(host);
       });
-      return makeTools({ catalog: loaded, cwd, desk: deskName(process.env), files, host: hostEffect });
+      return makeTools({ catalog: loaded, checkout: process.env.PEONS_CHECKOUT === "on", cwd, desk: deskName(process.env), files, host: hostEffect });
     });
 
   const execute = (name: keyof ReturnType<typeof makeTools>) => async (_id: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: { readonly cwd: string }) => {
