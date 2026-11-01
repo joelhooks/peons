@@ -135,7 +135,9 @@ export default function peons(pi: ExtensionAPI) {
     execute: execute("peon_status"),
     label: "Peon status",
     name: "peon_status",
-    parameters: Type.Union([Type.Object({ runId: Type.String() }), Type.Object({ swarmId: Type.String() })]),
+    // One object, not a union: Claude-bridge sessions refuse non-object tool schemas at the first turn.
+    // tools.ts still decodes exactly one of runId or swarmId.
+    parameters: Type.Object({ runId: Type.Optional(Type.String()), swarmId: Type.Optional(Type.String()) }),
   });
   pi.registerTool({
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true, readOnlyHint: false },
