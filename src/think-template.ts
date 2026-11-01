@@ -32,6 +32,8 @@ export const ThinkTemplate = Schema.Struct({
   template: Slug,
   version: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
   warmup: Schema.NonEmptyArray(Schema.Struct({ doc: DocName, path: RelPath, sha256: Sha256 })),
+  // "checkout": the template reads the pinned checkout at /work and compiles only with one.
+  workspace: Schema.optionalKey(Schema.Literal("checkout")),
 });
 
 export type ThinkTemplate = typeof ThinkTemplate.Type;

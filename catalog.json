@@ -357,6 +357,32 @@
         "repoCount": 1,
         "source": "swarm drovr-dead-code-a1 2026-10-27, 15 runs, 1015 items"
       }
+    },
+    {
+      "template": "dead-code-judge",
+      "version": 2,
+      "kind": "judge",
+      "summary": "Judge a dead-code batch by reading and grepping the pinned checkout at /work itself, including tests, fixtures, dynamic callers and own-file use.",
+      "owner": "agent-graph/desk",
+      "input": "JSON batch of {id} items (path#name or a whole-file path), optional desk-specific rules, and checkout { repo, sha }.",
+      "output": "peons.verdict.dead-code.v2: one dead/live/drop-export/unsure verdict per id, with path:line proof, the exact searches and their output, confidence and exclusive test files.",
+      "verify": "Validate 1:1 batch ids; each dead item quotes its definition path:line and one plain rg or grep over /work (optionally | grep -v of its own definition line) that keeps tests and fixtures and printed nothing else. Before deleting on a dead verdict, rerun its exact command against an export at the same sha. Missing caller coverage means unsure.",
+      "needs": [
+        "read-only",
+        "checkout"
+      ],
+      "model": "opus",
+      "thinking": "medium",
+      "refusals": [
+        "Refuse a request without a checkout, malformed batches, or dead verdicts without an empty search over /work.",
+        "Never edit, send, push or deploy. Inconclusive evidence is unsure, not a failed run."
+      ],
+      "cellReady": false,
+      "evidence": {
+        "count": 0,
+        "repoCount": 0,
+        "source": "no runs yet: waits for the celld workspace (peons #15)"
+      }
     }
   ]
 }
