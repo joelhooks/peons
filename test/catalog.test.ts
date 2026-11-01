@@ -17,8 +17,8 @@ describe("peons catalog", () => {
     expect(catalog.entries.length).toBeGreaterThan(0);
   });
 
-  it("names each template once", () => {
-    const names = catalog.entries.map((entry) => entry.template);
+  it("names each template version once", () => {
+    const names = catalog.entries.map((entry) => `${entry.template}@${entry.version}`);
     expect(new Set(names).size).toBe(names.length);
   });
 

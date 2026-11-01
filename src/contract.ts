@@ -15,7 +15,7 @@ const PeonAt = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,47}@[1-9]
 
 export const PeonKind = Schema.Literals(["read", "judge", "classify", "measure", "work"]);
 
-export const Need = Schema.Literals(["model-only", "read-only", "shell", "git-commit", "network", "secrets", "browser"]);
+export const Need = Schema.Literals(["model-only", "read-only", "shell", "git-commit", "network", "secrets", "browser", "checkout"]);
 
 export const TemplateRef = Schema.Struct({
   digest: Sha256,

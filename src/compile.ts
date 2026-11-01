@@ -551,6 +551,10 @@ const compileBare = (request: PeonRequest, resolved: Resolved | null, loaded: Lo
 
 // One compiler per shape: {profile} routes here, templates through think-template.ts; a checkout wraps either.
 export const compileRun = (request: PeonRequest, resolved: Resolved | null, loaded: LoadedTemplate | null): Compiled | Prompt => {
+  // Without /work such a peon has nothing to grep, and an empty search would read as dead code.
+  if (loaded?.spec.workspace === "checkout" && request.checkout === undefined) {
+    return compileRefused(`${loaded.spec.template}@${loaded.spec.version} reads the checkout at /work, and the request has none`, "a request with checkout { repo, sha }", "add checkout { repo, sha } to the job and export PEONS_CHECKOUT=on on the desk");
+  }
   const compiled = compileBare(request, resolved, loaded);
   if (compiled instanceof Prompt || request.checkout === undefined) {return compiled;}
   const plan = withCheckout(compiled.plan, request.checkout);
