@@ -24,9 +24,9 @@ const job = ({ kind, variant }: JobSpec, index: number) => {
   return { brief, workType: kind };
 };
 const refused = (kind: Kind) => kind.startsWith("bad-");
-// A job's identity (its digest and default run id) covers base, input, scope and target, but not a
-// model override: today scan-opus is the same job as scan. See the pinned finding below.
-const identity = (specs: readonly JobSpec[]) => canonical(specs.map(({ kind, variant }) => ({ kind: kind === "scan-opus" ? "scan" : kind, variant })));
+// A job's identity (its digest and default run id) covers base, input, scope, target and any model
+// override, so scan-opus is a different job from scan.
+const identity = (specs: readonly JobSpec[]) => canonical(specs.map(({ kind, variant }) => ({ kind, variant })));
 
 // A small menu of job lists makes repeats (same id, same or different jobs) common.
 const Command = Schema.Union([
@@ -123,10 +123,7 @@ describe("peon_swarm command model", () => {
     expect([...seen].toSorted()).toEqual(["refused job", "refused reuse", "repeated auto", "repeated named", "started auto", "started named", "status known", "status unknown"]);
   }, 30_000);
 
-  // Finding, not fixed here: a rerun under the same swarmId that only adds model: "opus" passes the
-  // same-jobs check, submits nothing, and reports the earlier luna run as the opus job's answer.
-  // This flips to passing once the model override is part of the job digest.
-  it.fails("refuses a same-id rerun whose only change is a model override", async () => {
+  it("refuses a same-id rerun whose only change is a model override", async () => {
     const scan: JobSpec = { kind: "scan", variant: 0 };
     const tools = toolsWith(fakeHost().host, memoryFiles().files);
     await run(tools.peon_swarm({ jobs: [job(scan, 0)], swarmId: "swarm-a" }));
