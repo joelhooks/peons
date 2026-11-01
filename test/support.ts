@@ -70,8 +70,9 @@ export const catalog: Catalog = {
   unlisted: [{ digest: "0".repeat(64), model: "openai-codex/gpt-6.1-sol", template: "fix-tool", thinking: "medium", version: 1 }],
 };
 
-export const forAll = async <A>(arbitrary: Arbitrary.Arbitrary<A>, property: (value: A) => boolean | Promise<boolean>, runs = 200): Promise<string | undefined> => {
-  const result = await Effect.runPromise(Arbitrary.checkEffect(arbitrary, (value) => Effect.promise(async () => await property(value)), { runs }));
+// size raises the default collection length (about 10), for command lists that need long histories.
+export const forAll = async <A>(arbitrary: Arbitrary.Arbitrary<A>, property: (value: A) => boolean | Promise<boolean>, runs = 200, size?: number): Promise<string | undefined> => {
+  const result = await Effect.runPromise(Arbitrary.checkEffect(arbitrary, (value) => Effect.promise(async () => await property(value)), { runs, size }));
   return Arbitrary.formatCheckFailure(result);
 };
 
