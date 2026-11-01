@@ -90,29 +90,58 @@ const searchTerm = ({ path, symbol }: { readonly path: string; readonly symbol: 
 const inWork = (path: string) => path.replace(/^\/work\//u, "");
 const fileOf = (at: string) => inWork(at.slice(0, at.lastIndexOf(":")));
 
-// A dead search is one plain grep or rg over all of /work, so the command cannot hide a hit: no lists,
-// redirects or substitutions; no inverted, quiet or capped matches; no include, exclude, glob or type
-// filters. grep must recurse; rg must be -uu, since /work has no .git and rg would skip hidden dirs like
-// .github and obey any ignore files the repo ships. One `| grep -v` may follow, and only to drop the
-// definition: the pattern is exactly the item's path, with optional ^ and /work/, and for a symbol it must
-// end in the :<line>: of a proof in that file, since dropping the whole file would hide own-file use.
-// Without the tail, the verifier drops the definition line itself.
+// A dead search is one plain grep or rg over all of /work, so the command cannot hide a hit. Flags are an
+// allowlist: anything that inverts, quiets, caps, narrows the files or depth, or reads patterns elsewhere
+// is refused by being absent. The only positionals are the pattern (unless -e gives it) and /work. grep
+// must recurse; rg must be -uu, since /work has no .git and rg would skip hidden dirs like .github and
+// obey any ignore files the repo ships. One `| grep -v` may follow, and only to drop the definition: the
+// pattern is exactly the item's path, with optional ^ and /work/, and for a symbol it must end in the
+// :<line>: of a proof in that file, since dropping the whole file would hide own-file use. Without the
+// tail, the verifier drops the definition line itself. The pattern must be the term itself: a longer
+// one, like unused_x for unused, matches less and hides callers. Shell characters are refused outright,
+// since whoever acts on a dead verdict reruns the command and a batch path could carry them.
 const SHELL = /[;&<>`\n]|\$\(/u;
-const LONG_BANNED = ["--invert-match", "--quiet", "--silent", "--files-without-match", "--max-count", "--exclude", "--include", "--glob", "--iglob", "--type", "--ignore-file"];
-const SHORT_BANNED = /[vqLmgtT]/u;
+const FLAGS = {
+  grep: { long: ["--recursive", "--dereference-recursive", "--line-number", "--with-filename", "--ignore-case", "--fixed-strings", "--extended-regexp", "--no-messages", "--word-regexp", "--binary-files=without-match"], short: "rRnHiIFEsw" },
+  rg: { long: ["--no-ignore", "--hidden", "--line-number", "--with-filename", "--ignore-case", "--fixed-strings", "--word-regexp", "--case-sensitive"], short: "unHiFsw" },
+} as const;
 
 const unquote = (token: string) => token.replace(/^(?<quote>['"])(?<inner>.*)\k<quote>$/u, "$<inner>");
 const tokensOf = (part: string) => part.trim().split(/\s+/u).map(unquote);
 
-const plainSearch = (head: string): boolean => {
+interface Parsed { readonly long: readonly string[]; readonly short: string; readonly positional: readonly string[]; readonly patterns: readonly string[] }
+
+// Split a head's arguments by the allowlist; undefined when any flag is off it.
+const parseArgs = (args: readonly string[], allowed: { readonly long: readonly string[]; readonly short: string }): Parsed | undefined => {
+  const shortFlags = new RegExp(`^-[${allowed.short}]+$`, "u");
+  const parsed = { long: [] as string[], patterns: [] as string[], positional: [] as string[], short: "" };
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "-e") {
+      index += 1;
+      parsed.patterns.push(args[index] ?? "");
+    } else if (arg.startsWith("-") && arg.length > 1) {
+      if (!allowed.long.includes(arg) && !shortFlags.test(arg)) {return undefined;}
+      if (arg.startsWith("--")) {parsed.long.push(arg);} else {parsed.short += arg.slice(1);}
+    } else {parsed.positional.push(arg);}
+  }
+  return parsed;
+};
+
+const recurses = (tool: "grep" | "rg", { long, short }: Parsed) =>
+  tool === "grep"
+    ? /[rR]/u.test(short) || long.includes("--recursive") || long.includes("--dereference-recursive")
+    : (short.match(/u/gu) ?? []).length >= 2 || (long.includes("--no-ignore") && long.includes("--hidden"));
+
+// The search pattern, or undefined when the head is not a plain search.
+const plainSearch = (head: string): string | undefined => {
   const [tool, ...args] = tokensOf(head);
-  const long = args.filter((arg) => arg.startsWith("--")).map((arg) => arg.split("=")[0] ?? arg);
-  const short = args.filter((arg) => /^-[^-]/u.test(arg)).join("");
-  if (long.some((flag) => LONG_BANNED.some((banned) => flag.startsWith(banned))) || SHORT_BANNED.test(short)) {return false;}
-  if (!args.some((arg) => arg === "/work" || arg === "/work/")) {return false;}
-  if (tool === "grep") {return /[rR]/u.test(short) || long.includes("--recursive") || long.includes("--dereference-recursive");}
-  if (tool === "rg") {return (short.match(/u/gu) ?? []).length >= 2 || (long.includes("--no-ignore") && long.includes("--hidden"));}
-  return false;
+  if (tool !== "grep" && tool !== "rg") {return undefined;}
+  const parsed = parseArgs(args, FLAGS[tool]);
+  if (parsed === undefined || parsed.patterns.length > 1) {return undefined;}
+  const [pattern, ...paths] = parsed.patterns.length === 0 ? parsed.positional : [...parsed.patterns, ...parsed.positional];
+  const whole = paths.length === 1 && (paths[0] === "/work" || paths[0] === "/work/");
+  return whole && pattern !== undefined && pattern.length > 0 && recurses(tool, parsed) ? pattern : undefined;
 };
 
 const escapeRegExp = (text: string) => text.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -127,12 +156,13 @@ const definitionTail = (tail: string, parts: { readonly path: string; readonly s
   return proof.some(({ at }) => fileOf(at) === inWork(parts.path) && at.endsWith(`:${line}`));
 };
 
-const searchShape = (command: string, parts: { readonly path: string; readonly symbol: string }, proof: readonly { readonly at: string }[]): boolean => {
-  if (SHELL.test(command)) {return false;}
+// The search pattern of a dead search in the allowed shape, or undefined.
+const searchShape = (command: string, parts: { readonly path: string; readonly symbol: string }, proof: readonly { readonly at: string }[]): string | undefined => {
+  if (SHELL.test(command)) {return undefined;}
   // `a || b` splits into three parts, so it is refused with every other second pipe.
   const [head, tail, ...more] = command.split("|");
-  if (head === undefined || more.length > 0 || !plainSearch(head)) {return false;}
-  return tail === undefined || definitionTail(tail, parts, proof);
+  const pattern = head === undefined || more.length > 0 ? undefined : plainSearch(head);
+  return pattern !== undefined && (tail === undefined || definitionTail(tail, parts, proof)) ? pattern : undefined;
 };
 
 // Output lines left once the definition and .brain docs are dropped. A symbol's definition is a proof
@@ -157,7 +187,7 @@ export const verifyDeadCodeProofV2 = (verdict: typeof DeadCodeVerdictV2.Type): b
   const located = item.proof.some(({ at, quote }) => (parts.path.length > 0 && (fileOf(at) === inWork(parts.path) || fileOf(at).endsWith(`/${parts.path}`))) || (parts.symbol.length > 0 && quote.includes(parts.symbol)));
   if (!located || item.verdict === "drop-export") {return located;}
   const term = searchTerm(parts);
-  return term.length > 0 && item.searches.some(({ command, output }) => searchShape(command, parts, item.proof) && (command.split("|")[0] ?? "").includes(term) && callers(output, parts, item.proof).length === 0);
+  return term.length > 0 && item.searches.some(({ command, output }) => searchShape(command, parts, item.proof) === term && callers(output, parts, item.proof).length === 0);
 });
 
 export const verdicts = {

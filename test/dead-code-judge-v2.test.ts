@@ -104,6 +104,25 @@ describe("dead-code-judge@2", () => {
       "rg -uu -n unused /work -g '!fixtures'",
       "rg -uu -n unused /work --type-not ts",
       "ag unused /work",
+      // Flags are an allowlist: these all could print nothing with callers present.
+      "grep -rnx unused /work",
+      "grep -rn --line-regexp unused /work",
+      "grep -rn -f /tmp/p /work",
+      "grep -rn -f /tmp/unused /work",
+      // grep reads patterns from a file named unused and prints nothing.
+      "grep -rn -f unused /work",
+      "grep -rnf unused /work",
+      "grep -rn -e unused -e other /work",
+      "rg -uu -n --max-depth 1 unused /work",
+      "rg -uu -n -d 1 unused /work",
+      "rg -uu -n --max-depth=1 unused /work",
+      "grep -rn unused /work /work/src",
+      "grep -rn unused /work /tmp/copy",
+      "grep -rn -- unused /work",
+      // The pattern is the term itself; a longer one matches less.
+      "grep -rn unused_nope /work",
+      "grep -rn 'unused()' /work",
+      "grep -rn -e unused; /work",
       // The one allowed tail drops only the definition line in the item's own file.
       "grep -rn unused /work | grep -v '^/work/src/a.ts:12:' | grep -v '^/work/src/b.ts'",
       "grep -rn unused /work | grep -v '^/work/src/a.ts'",
@@ -122,6 +141,8 @@ describe("dead-code-judge@2", () => {
       "grep -Rnw unused /work/",
       "rg -uu -n unused /work",
       "rg -n --no-ignore --hidden unused /work",
+      "grep -rnwFi --binary-files=without-match -e unused /work",
+      "rg -uu -nHs --word-regexp unused /work",
       "grep -rn unused /work | grep -v '^/work/src/a.ts:12:'",
       "rg -uu -n unused /work | grep -v \"src/a.ts:12:\"",
       "grep -rn unused /work | grep -v ^/work/src/a.ts:12:",
@@ -131,6 +152,9 @@ describe("dead-code-judge@2", () => {
     // A definition under test/ may sit in its own output.
     const own = { confidence: "high", id: "test/helpers.ts#unusedHelper", proof: [{ at: "test/helpers.ts:4", quote: "export const unusedHelper = 1;" }], searches: [{ command: "grep -rn unusedHelper /work", output: "/work/test/helpers.ts:4:export const unusedHelper = 1;" }], testFilesCoveringOnlyIt: [], verdict: "dead" };
     expect(decodeVerdict(name, { items: [own], schema: name }, { batch: JSON.stringify([{ id: own.id }]) }).ok).toBe(true);
+    // A shell character in a batch path would run on the rerun, so the tail cannot carry it.
+    const hostile = { ...item("src/a.ts#unused", "dead", [{ command: "grep -rn unused /work | grep -v ^/work/src/a;id.ts:12:", output: "" }]), id: "src/a;id.ts#unused", proof: [{ at: "src/a;id.ts:12", quote: "export const unused = 1;" }] };
+    expect(decodeVerdict(name, { items: [hostile], schema: name }, { batch: JSON.stringify([{ id: hostile.id }]) }).ok).toBe(false);
     // A whole file may drop all its own lines.
     expect(ok(output(item("src/a.ts#unused", "dead", [grep]), item("scripts/old.ts", "dead", [{ command: "grep -rn old /work | grep -v '^/work/scripts/old.ts'", output: "" }])))).toBe(true);
   });

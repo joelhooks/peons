@@ -6,7 +6,7 @@ proof is at least one {at, quote}: at is a path:line in /work, like src/a.ts:12,
 
 searches is every command you ran for that item, as {command, output}: the exact command line and its exact output, "" when it printed nothing. A dead item needs at least one search in exactly this shape:
 
-- `grep -rn <term> /work` or `rg -uu -n <term> /work`, over the whole of /work, where <term> is the item's symbol, or for a whole-file id the file name without its extension. Other flags are fine except -v, -q, -L, -m and any include, exclude, glob or type filter, so tests and fixtures stay in scope.
+- `grep -rn <term> /work` or `rg -uu -n <term> /work`, over the whole of /work, where <term> is the item's symbol, or for a whole-file id the file name without its extension, written exactly with nothing added (use -w for word boundaries). Its only other words are the pattern (or `-e <pattern>`) and /work. Flags are an allowlist, and any other flag refuses dead. grep: -r -R -n -H -i -I -F -E -s -w, --recursive, --dereference-recursive, --line-number, --with-filename, --ignore-case, --fixed-strings, --extended-regexp, --no-messages, --word-regexp, --binary-files=without-match. rg: -u (at least twice) -n -H -i -F -s -w, --no-ignore, --hidden, --line-number, --with-filename, --ignore-case, --fixed-strings, --word-regexp, --case-sensitive. Tests and fixtures stay in scope.
 - Optionally followed by exactly one `| grep -v '^/work/<path>:<line>:'`, where <path> is the item's file written literally and <line> is the definition line you quote in proof. For a whole-file id, `| grep -v '^/work/<path>'` drops the file's own lines.
 - Nothing else: no other pipes, no ;, &&, ||, redirects such as 2>/dev/null, $( ) or backticks.
 
