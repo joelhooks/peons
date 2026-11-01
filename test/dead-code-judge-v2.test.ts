@@ -23,8 +23,9 @@ const thinkSteps = (plan: MischiefSubmission): (typeof ThinkStep.Type)[] =>
     return step.kind === "think" ? [step] : [];
   });
 
-const grep = { command: "grep -rn unused /work --exclude-dir=.brain | grep -v '^/work/src/a.ts:12:'", output: "" };
-const fileGrep = { command: "grep -rn old /work | grep -v '^/work/scripts/old.ts:'", output: "" };
+// The verifier drops the definition line, a whole file's own lines and .brain docs; the command may not.
+const grep = { command: "grep -rn unused /work", output: "/work/src/a.ts:12:export const unused = 1;\n/work/.brain/notes.svx:3:unused is dead\n" };
+const fileGrep = { command: "rg -uu -n old /work", output: "scripts/old.ts:3:// old entry point" };
 const item = (id: string, verdict: string, searches: readonly { command: string; output: string }[]) => ({
   confidence: "high",
   id,
@@ -71,20 +72,67 @@ describe("dead-code-judge@2", () => {
     expect(decoded.ok && quotesOf(decoded.verdict)).toEqual([]);
   });
 
-  it("refuses a dead verdict without a grep command over /work that printed nothing", () => {
+  it("refuses a dead verdict without a grep command over /work that found nothing but its definition", () => {
     expect(ok(output(item("src/a.ts#unused", "dead", [])))).toBe(false);
-    expect(ok(output(item("src/a.ts#unused", "dead", [{ ...grep, output: "/work/src/b.ts:3:unused()" }])))).toBe(false);
+    expect(ok(output(item("src/a.ts#unused", "dead", [{ ...grep, output: `${grep.output}/work/src/b.ts:3:unused()` }])))).toBe(false);
     expect(ok(output(item("src/a.ts#unused", "dead", [{ command: "grep -rn unused src", output: "" }])))).toBe(false);
     expect(ok(output(item("src/a.ts#unused", "dead", [{ command: "grep -rn other /work", output: "" }])))).toBe(false);
+    // A proof line in another file is not a definition, so it cannot hide that file's caller.
+    const hidden = { ...item("src/a.ts#unused", "dead", [{ ...grep, output: `${grep.output}/work/src/b.ts:3:unused()` }]), proof: [{ at: "src/a.ts:12", quote: "export const unused = 1;" }, { at: "src/b.ts:3", quote: "unused()" }] };
+    expect(ok(output(hidden))).toBe(false);
   });
 
-  it("refuses a dead search that leaves out tests or fixtures, since those count as use", () => {
-    for (const exclude of ["--exclude-dir=test", "--exclude-dir=__tests__", "--exclude='*.test.*'", "--exclude='*.spec.*'", "--exclude-dir=fixtures", "| grep -v test/"]) {
-      expect(ok(output(item("src/a.ts#unused", "dead", [{ ...grep, command: `${grep.command} ${exclude}` }]))), exclude).toBe(false);
+  it("refuses a dead search whose command could hide a hit", () => {
+    for (const command of [
+      "grep -rn unused /work | grep -v unused",
+      "grep -rn unused /work || true",
+      "grep -rn unused /work 2>/dev/null",
+      "grep -rn unused /work; true",
+      "grep -rn unused /work && true",
+      "grep -rn unused $(echo /work)",
+      "grep -rnv unused /work",
+      "grep -rn --invert-match unused /work",
+      "grep -rqn unused /work",
+      "grep -rn -m0 unused /work",
+      "grep -rn unused /work --exclude-dir=test",
+      "grep -rn unused /work --exclude-dir=__tests__",
+      "grep -rn unused /work --exclude='*.spec.*'",
+      "grep -rn unused /work --include='*.ts'",
+      "grep -n unused /work",
+      "grep -rn unused /work/src",
+      "rg -n unused /work",
+      "rg -uu -n unused /work -g '!fixtures'",
+      "rg -uu -n unused /work --type-not ts",
+      "ag unused /work",
+      // The one allowed tail drops only the definition line in the item's own file.
+      "grep -rn unused /work | grep -v '^/work/src/a.ts:12:' | grep -v '^/work/src/b.ts'",
+      "grep -rn unused /work | grep -v '^/work/src/a.ts'",
+      "grep -rn unused /work | grep -v src/a.ts",
+      "grep -rn unused /work | grep -v '^/work/src/a.ts:13:'",
+      "grep -rn unused /work | grep -v '^/work/src/b.ts:3:'",
+      "grep -rn unused /work | grep -v '^/work/src/a.ts.*'",
+      "grep -rn unused /work | grep -v '^/work/src/a.ts:12:\\|unused'",
+      "grep -rn unused /work | grep -v -e '^/work/src/a.ts:12:'",
+      "grep -rn unused /work | grep '^/work/src/a.ts:12:'",
+    ]) {
+      expect(ok(output(item("src/a.ts#unused", "dead", [{ command, output: "" }]))), command).toBe(false);
     }
-    // A definition under test/ may name its own path while excluding its line.
-    const own = { confidence: "high", id: "test/helpers.ts#unusedHelper", proof: [{ at: "test/helpers.ts:4", quote: "export const unusedHelper = 1;" }], searches: [{ command: "grep -rn unusedHelper /work | grep -v '^/work/test/helpers.ts:4:'", output: "" }], testFilesCoveringOnlyIt: [], verdict: "dead" };
+    for (const command of [
+      "grep -rn unused /work",
+      "grep -Rnw unused /work/",
+      "rg -uu -n unused /work",
+      "rg -n --no-ignore --hidden unused /work",
+      "grep -rn unused /work | grep -v '^/work/src/a.ts:12:'",
+      "rg -uu -n unused /work | grep -v \"src/a.ts:12:\"",
+      "grep -rn unused /work | grep -v ^/work/src/a.ts:12:",
+    ]) {
+      expect(ok(output(item("src/a.ts#unused", "dead", [{ command, output: "" }]))), command).toBe(true);
+    }
+    // A definition under test/ may sit in its own output.
+    const own = { confidence: "high", id: "test/helpers.ts#unusedHelper", proof: [{ at: "test/helpers.ts:4", quote: "export const unusedHelper = 1;" }], searches: [{ command: "grep -rn unusedHelper /work", output: "/work/test/helpers.ts:4:export const unusedHelper = 1;" }], testFilesCoveringOnlyIt: [], verdict: "dead" };
     expect(decodeVerdict(name, { items: [own], schema: name }, { batch: JSON.stringify([{ id: own.id }]) }).ok).toBe(true);
+    // A whole file may drop all its own lines.
+    expect(ok(output(item("src/a.ts#unused", "dead", [grep]), item("scripts/old.ts", "dead", [{ command: "grep -rn old /work | grep -v '^/work/scripts/old.ts'", output: "" }])))).toBe(true);
   });
 
   it("refuses dead and drop-export proof that is not tied to the item, and ids off the batch", () => {

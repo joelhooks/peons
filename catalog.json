@@ -366,7 +366,7 @@
       "owner": "agent-graph/desk",
       "input": "JSON batch of {id} items (path#name or a whole-file path), optional desk-specific rules, and checkout { repo, sha }.",
       "output": "peons.verdict.dead-code.v2: one dead/live/drop-export/unsure verdict per id, with path:line proof, the exact searches and their output, confidence and exclusive test files.",
-      "verify": "Validate 1:1 batch ids; each dead item quotes its definition path:line and an empty search over /work that keeps tests and fixtures. Missing caller coverage means unsure.",
+      "verify": "Validate 1:1 batch ids; each dead item quotes its definition path:line and one plain rg or grep over /work (optionally | grep -v of its own definition line) that keeps tests and fixtures and printed nothing else. Before deleting on a dead verdict, rerun its exact command against an export at the same sha. Missing caller coverage means unsure.",
       "needs": [
         "read-only",
         "checkout"

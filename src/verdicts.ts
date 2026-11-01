@@ -83,29 +83,81 @@ const idParts = (id: string) => {
   return separator === -1 ? { path: id, symbol: "" } : { path: id.slice(0, separator), symbol: id.slice(separator + 1) };
 };
 
-// Test and fixture references count as use, so a search that leaves them out cannot prove dead.
-// Word-bounded, so --exclude-dir=test counts and a symbol like testHelper does not.
-const TEST_PATHS = /(?:^|[^\w-])(?:test|tests|__tests__|fixtures)(?:[^\w-]|$)|\.(?:test|spec)\./u;
-
 // What a dead search must look for: the symbol, or a whole file's name without its extension.
 const searchTerm = ({ path, symbol }: { readonly path: string; readonly symbol: string }) =>
   symbol.length > 0 ? symbol : (path.split("/").at(-1) ?? "").replace(/\.[^.]+$/u, "");
 
-const fileOf = (at: string) => at.slice(0, at.lastIndexOf(":"));
+const inWork = (path: string) => path.replace(/^\/work\//u, "");
+const fileOf = (at: string) => inWork(at.slice(0, at.lastIndexOf(":")));
+
+// A dead search is one plain grep or rg over all of /work, so the command cannot hide a hit: no lists,
+// redirects or substitutions; no inverted, quiet or capped matches; no include, exclude, glob or type
+// filters. grep must recurse; rg must be -uu, since /work has no .git and rg would skip hidden dirs like
+// .github and obey any ignore files the repo ships. One `| grep -v` may follow, and only to drop the
+// definition: the pattern is exactly the item's path, with optional ^ and /work/, and for a symbol it must
+// end in the :<line>: of a proof in that file, since dropping the whole file would hide own-file use.
+// Without the tail, the verifier drops the definition line itself.
+const SHELL = /[;&<>`\n]|\$\(/u;
+const LONG_BANNED = ["--invert-match", "--quiet", "--silent", "--files-without-match", "--max-count", "--exclude", "--include", "--glob", "--iglob", "--type", "--ignore-file"];
+const SHORT_BANNED = /[vqLmgtT]/u;
+
+const unquote = (token: string) => token.replace(/^(?<quote>['"])(?<inner>.*)\k<quote>$/u, "$<inner>");
+const tokensOf = (part: string) => part.trim().split(/\s+/u).map(unquote);
+
+const plainSearch = (head: string): boolean => {
+  const [tool, ...args] = tokensOf(head);
+  const long = args.filter((arg) => arg.startsWith("--")).map((arg) => arg.split("=")[0] ?? arg);
+  const short = args.filter((arg) => /^-[^-]/u.test(arg)).join("");
+  if (long.some((flag) => LONG_BANNED.some((banned) => flag.startsWith(banned))) || SHORT_BANNED.test(short)) {return false;}
+  if (!args.some((arg) => arg === "/work" || arg === "/work/")) {return false;}
+  if (tool === "grep") {return /[rR]/u.test(short) || long.includes("--recursive") || long.includes("--dereference-recursive");}
+  if (tool === "rg") {return (short.match(/u/gu) ?? []).length >= 2 || (long.includes("--no-ignore") && long.includes("--hidden"));}
+  return false;
+};
+
+const escapeRegExp = (text: string) => text.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+const definitionTail = (tail: string, parts: { readonly path: string; readonly symbol: string }, proof: readonly { readonly at: string }[]): boolean => {
+  const tokens = tokensOf(tail);
+  if (tokens.length !== 3 || tokens[0] !== "grep" || tokens[1] !== "-v" || parts.path.length === 0) {return false;}
+  const shape = new RegExp(`^\\^?(?:/work/)?${escapeRegExp(inWork(parts.path))}(?::(?<line>[1-9][0-9]*):)?$`, "u").exec(tokens[2] ?? "");
+  if (shape === null) {return false;}
+  const line = shape.groups?.line;
+  if (line === undefined) {return parts.symbol.length === 0;}
+  return proof.some(({ at }) => fileOf(at) === inWork(parts.path) && at.endsWith(`:${line}`));
+};
+
+const searchShape = (command: string, parts: { readonly path: string; readonly symbol: string }, proof: readonly { readonly at: string }[]): boolean => {
+  if (SHELL.test(command)) {return false;}
+  // `a || b` splits into three parts, so it is refused with every other second pipe.
+  const [head, tail, ...more] = command.split("|");
+  if (head === undefined || more.length > 0 || !plainSearch(head)) {return false;}
+  return tail === undefined || definitionTail(tail, parts, proof);
+};
+
+// Output lines left once the definition and .brain docs are dropped. A symbol's definition is a proof
+// path:line in its own file, printed as path:line:text (grep -n, rg -n); a whole file drops its own lines.
+const callers = (output: string, parts: { readonly path: string; readonly symbol: string }, proof: readonly { readonly at: string }[]) => {
+  const definitions = proof.filter(({ at }) => parts.path.length > 0 && fileOf(at) === inWork(parts.path)).map(({ at }) => `${inWork(at)}:`);
+  return output.split("\n").map((line) => inWork(line.trim())).filter((line) => {
+    if (line.length === 0) {return false;}
+    const file = line.slice(0, Math.max(0, line.indexOf(":")));
+    if (file.startsWith(".brain/") || file.includes("/.brain/")) {return false;}
+    if (parts.symbol.length === 0 && parts.path.length > 0 && file === inWork(parts.path)) {return false;}
+    return !definitions.some((definition) => line.startsWith(definition));
+  });
+};
 
 // v2 proof, read from /work. dead and drop-export quote a path:line tied to the item, as in v1. dead also
-// needs an exact command over /work that looks for the item, does not leave out tests or fixtures, and
-// printed nothing once the definition line was excluded. An empty search is the claim; the quote is where.
+// needs a plain search over /work for the item that printed nothing but its definition and .brain docs.
+// The output is self-reported: whoever acts on a dead verdict re-runs the exact command at the same sha.
 export const verifyDeadCodeProofV2 = (verdict: typeof DeadCodeVerdictV2.Type): boolean => verdict.items.every((item) => {
   if (item.verdict !== "dead" && item.verdict !== "drop-export") {return true;}
   const parts = idParts(item.id);
-  const located = item.proof.some(({ at, quote }) => (parts.path.length > 0 && (fileOf(at) === parts.path || fileOf(at).endsWith(`/${parts.path}`))) || (parts.symbol.length > 0 && quote.includes(parts.symbol)));
+  const located = item.proof.some(({ at, quote }) => (parts.path.length > 0 && (fileOf(at) === inWork(parts.path) || fileOf(at).endsWith(`/${parts.path}`))) || (parts.symbol.length > 0 && quote.includes(parts.symbol)));
   if (!located || item.verdict === "drop-export") {return located;}
   const term = searchTerm(parts);
-  return term.length > 0 && item.searches.some(({ command, output }) => {
-    const rest = parts.path.length > 0 ? command.replaceAll(parts.path, "") : command;
-    return command.includes("/work") && command.includes(term) && output.trim() === "" && !TEST_PATHS.test(rest);
-  });
+  return term.length > 0 && item.searches.some(({ command, output }) => searchShape(command, parts, item.proof) && (command.split("|")[0] ?? "").includes(term) && callers(output, parts, item.proof).length === 0);
 });
 
 export const verdicts = {
