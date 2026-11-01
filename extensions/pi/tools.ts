@@ -165,6 +165,8 @@ const swarmKind = (result: PeonRunResult | null): string => {
   return "type" in result ? result.type.replace("peon.", "") : "running";
 };
 
+const withModel = <T extends object>(content: T, model: string | undefined) => (model === undefined ? content : { ...content, model });
+
 export const onGateway = (resolved: Resolved | null, loaded: LoadedTemplate | null, model?: string): Resolved | null | Prompt => {
   if (loaded !== null) {
     return model === undefined || model === loaded.spec.profile.model ? resolved : modelRefused(`template ${loaded.spec.template}@${loaded.spec.version} pins model ${loaded.spec.profile.model}, and the job asked for ${model}`, "drop model from the job, or use a workType route instead of the template");
@@ -318,7 +320,8 @@ export const makeTools = (deps: ToolDeps) => {
       const [name, version] = (given.peon ?? "").split("@");
       const target = given.workType === undefined ? { kind: "template", template: name, version: version === undefined ? null : Number(version) } : { kind: "work-type", workType: given.workType };
       const content = { base: given.base ?? null, ...(given.checkout === undefined ? {} : { checkout: given.checkout }), input, scope: given.scope ?? [], target };
-      const runId = given.runId ?? defaultRunId(content);
+      const identity = withModel(content, given.model);
+      const runId = given.runId ?? defaultRunId(identity);
       const request = yield* decodeRequest(tool, { desk, runId, schema: "peons.request.v1", ...content });
       const refusedAs = (template: string, route: FrozenStep["route"], refused: Prompt) => ({ refused: output(refusedRecord(request, template, route, refused)) });
       const targeted = targetOf(catalog, request, templatesAccepted);
@@ -329,7 +332,7 @@ export const makeTools = (deps: ToolDeps) => {
       if (resolved instanceof Prompt) {return refusedAs(refusedName, routeOf(routed), resolved);}
       const compiled = compileRun(request, resolved, loaded);
       if (compiled instanceof Prompt) {return refusedAs(refusedName, routeOf(resolved), compiled);}
-      return { compiled, digest: sha256(canonical(content)), refusedName, request, route: compiled.frozen.steps[compiled.frozen.final]?.route ?? null };
+      return { compiled, digest: sha256(canonical(identity)), refusedName, request, route: compiled.frozen.steps[compiled.frozen.final]?.route ?? null };
     });
 
   const peon_run = (raw: unknown) =>
