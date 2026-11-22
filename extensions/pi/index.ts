@@ -3,6 +3,7 @@
 // Effect Schema. Nothing starts at load: the catalog loads on first use, and the live host leases
 // the desk identity on the first call that needs it.
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +16,7 @@ import { Prompt, prompt } from "../../src/compile.ts";
 import { loadCatalog } from "./catalog.ts";
 import type { Catalog } from "./catalog.ts";
 import { leasedSigner, liveEnv, liveRunHost } from "./live-host.ts";
+import type { FleetConfig } from "./live-host.ts";
 import type { RunHostPort } from "./host.ts";
 import { makeTools } from "./tools.ts";
 import type { Files, ToolOutput } from "./tools.ts";
@@ -63,6 +65,19 @@ const files: Files = {
     }),
 };
 
+// The machine's peons config: { mischiefHost }. Missing is fine (env may carry it); malformed is refused.
+const FleetConfigFile = Schema.fromJsonString(Schema.Struct({ mischiefHost: Schema.optionalKey(Schema.String) }));
+const CONFIG_PATH = process.env.PEONS_CONFIG ?? nodePath.join(homedir(), ".config", "peons", "config.json");
+const fleetConfig: Effect.Effect<FleetConfig, Prompt> = files.read(CONFIG_PATH).pipe(
+  Effect.flatMap((bytes) =>
+    bytes === null
+      ? Effect.succeed({})
+      : Schema.decodeUnknownEffect(FleetConfigFile)(new TextDecoder().decode(bytes)).pipe(
+          Effect.mapError(() => prompt({ accepted: '{ "mischiefHost": "http://host:port/" }', debug: DEBUG, did: `read ${CONFIG_PATH}`, fix: `fix ${CONFIG_PATH}, or set MISCHIEF_HOST, then retry`, tag: "ConfigUnreadable", why: "the peons config is not that JSON shape" })),
+        ),
+  ),
+);
+
 const deskName = (env: NodeJS.ProcessEnv): Effect.Effect<string, Prompt> => {
   const name = env.PEONS_DESK ?? (env.RATKING_NAME === "off" ? undefined : env.RATKING_NAME);
   return name !== undefined && Schema.is(PeonRequest.fields.desk)(name)
@@ -77,12 +92,13 @@ export default function peons(pi: ExtensionAPI) {
     Effect.gen(function* toolsGen() {
       catalog ??= Effect.runPromise(loadCatalog(ROOT));
       const loaded = yield* Effect.tryPromise({ catch: () => prompt({ accepted: "a peons checkout whose pnpm test passes", debug: DEBUG, did: "loaded the peons catalog", fix: "run pnpm test in joelhooks/peons, fix what fails, then /reload", tag: "CatalogUnreadable", why: "routing.json, catalog.json or templates/ did not decode" }), try: async () => await (catalog ?? Promise.reject(new Error("unloaded"))) });
-      const hostEffect = Effect.suspend((): Effect.Effect<RunHostPort, Prompt> => {
-        if (host !== null) {return Effect.succeed(host);}
-        const env = liveEnv(process.env, tool);
-        if (env instanceof Prompt) {return Effect.fail(env);}
+      const hostEffect = Effect.gen(function* hostGen() {
+        if (host !== null) {return host;}
+        const config = yield* fleetConfig;
+        const env = liveEnv(process.env, tool, config);
+        if (env instanceof Prompt) {return yield* Effect.fail(env);}
         host = liveRunHost({ audience: env.audience, endpoint: env.endpoint, fetch, signer: leasedSigner(env.secretName) });
-        return Effect.succeed(host);
+        return host;
       });
       return makeTools({ catalog: loaded, checkout: process.env.PEONS_CHECKOUT === "on", cwd, desk: deskName(process.env), files, host: hostEffect });
     });
@@ -119,15 +135,22 @@ export default function peons(pi: ExtensionAPI) {
   });
   pi.registerTool({
     annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true, readOnlyHint: false },
-    description: "Start up to 64 peons at once, each job shaped like peon_run. Every job is checked first; if any is refused, none starts and each refusal is listed. Run ids are <swarmId>-<index>, so calling again with the same jobs starts nothing twice. Watch with peon_status({ swarmId }).",
+    description: "Start up to 64 peons in one call. Simplest form: { briefs: [\"...\", \"...\"] } runs each brief as a research peon (Luna, read-only think); add workType (scan, gather, investigation, review...) or peon: template@version to pick another, plus shared docs, base, scope or model. jobs: [peon_run-shaped jobs] still works, and a job's own fields win over the shared ones. Every job is checked first; if any is refused, none starts. Run ids are <swarmId>-<index>, so a repeat call starts nothing twice. Watch with peon_status({ swarmId }).",
     execute: execute("peon_swarm"),
     label: "Peon swarm",
     name: "peon_swarm",
     parameters: Type.Object({
-      jobs: Type.Array(RunJob, { maxItems: 64, minItems: 1 }),
+      base: Type.Optional(Type.Object({ repo: Type.String(), sha: Type.String() })),
+      briefs: Type.Optional(Type.Array(Type.String(), { description: "One peon per brief. Never include secrets.", maxItems: 64 })),
+      docs: Input.docs,
+      jobs: Type.Optional(Type.Array(RunJob, { maxItems: 64 })),
+      model: Type.Optional(Type.Union([Type.Literal("sol"), Type.Literal("luna"), Type.Literal("opus")], { description: "Override the route's model on workType jobs" })),
+      peon: Type.Optional(Type.String({ description: "Shared target: a runnable catalog template, like change-review@1" })),
+      scope: Type.Optional(Type.Array(Type.String())),
       swarmId: Type.Optional(Type.String({ description: "Lowercase id, like drovr-dead-code-a. Default: a digest of the jobs" })),
+      workType: Type.Optional(Type.String({ description: "Shared target work type. Default: research" })),
     }),
-    promptSnippet: "peon_swarm: start many peons all-or-none, then watch peon_status({ swarmId })",
+    promptSnippet: "peon_swarm({ briefs: [...] }): the default for read-only fan-out (research, scan, gather, review, judge); watch peon_status({ swarmId })",
   });
   pi.registerTool({
     annotations: { openWorldHint: true, readOnlyHint: true },
