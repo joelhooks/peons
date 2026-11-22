@@ -137,11 +137,22 @@ export interface LiveEnv {
   readonly audience: string;
 }
 
-export const liveEnv = (env: Readonly<Record<string, string | undefined>>, tool: string): LiveEnv | Prompt => {
-  const endpoint = env.MISCHIEF_HOST;
-  const secretName = env.PEONS_IDENTITY_SECRET;
+// Fleet defaults, so a desk needs no env to run a peon:
+// - the host comes from the machine's peons config (never committed: the address is private);
+// - the identity follows Lockjaw's naming for a fleet agent, rat_king_fleet_agent_<project>.<row>_identity.
+// An explicit env value always wins.
+export interface FleetConfig {
+  readonly mischiefHost?: string;
+}
+
+export const identitySecretOf = (desk: string | undefined): string | undefined =>
+  desk === undefined || desk === "" || desk === "off" ? undefined : `rat_king_fleet_agent_${desk.replaceAll("/", ".")}_identity`;
+
+export const liveEnv = (env: Readonly<Record<string, string | undefined>>, tool: string, config: FleetConfig = {}): LiveEnv | Prompt => {
+  const endpoint = env.MISCHIEF_HOST === undefined || env.MISCHIEF_HOST === "" ? config.mischiefHost : env.MISCHIEF_HOST;
+  const secretName = env.PEONS_IDENTITY_SECRET === undefined || env.PEONS_IDENTITY_SECRET === "" ? identitySecretOf(env.PEONS_DESK ?? env.RATKING_NAME) : env.PEONS_IDENTITY_SECRET;
   const missing = [...(endpoint === undefined || endpoint === "" ? ["MISCHIEF_HOST"] : []), ...(secretName === undefined || secretName === "" ? ["PEONS_IDENTITY_SECRET"] : [])];
-  const accepted = "MISCHIEF_HOST=<the Mischief worker origin, like http://host:port/> and PEONS_IDENTITY_SECRET=<the agent-secrets name of this desk's Rat King identity>";
+  const accepted = "MISCHIEF_HOST=<the Mischief worker origin, like http://host:port/> (or mischiefHost in ~/.config/peons/config.json) and PEONS_IDENTITY_SECRET=<the agent-secrets name of this desk's Rat King identity> (or RATKING_NAME, which names it by fleet convention)";
   if (missing.length > 0 || endpoint === undefined || secretName === undefined)
     {return prompt({ accepted, debug: DEBUG, did: `called ${tool}`, fix: `export ${missing.map((name) => `${name}=…`).join(" ")} in the desk's environment, /reload, then call ${tool} again`, tag: "HostUnset", why: `${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} not set` });}
   if (Result.isFailure(Schema.decodeResult(Endpoint)(endpoint)))

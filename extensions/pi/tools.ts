@@ -141,11 +141,35 @@ const SwarmManifest = Schema.Union([
 ]);
 const swarmRunIds = (manifest: typeof SwarmManifest.Type): readonly string[] => ("jobs" in manifest ? manifest.jobs.map(({ runId }) => runId) : manifest.runIds);
 
-const SWARM_SHAPE = `{ jobs: [${RUN_SHAPE}, ...] (1 to ${SWARM_MAX}), swarmId?: "<id>" }`;
+const SWARM_SHAPE = `{ briefs: ["<text>", ...] and/or jobs: [${RUN_SHAPE}, ...] (1 to ${SWARM_MAX} in all), plus shared workType | peon, model, docs, base, checkout, scope; swarmId?: "<id>" }`;
+const SharedJob = RunParams.mapFields(({ brief: _brief, event: _event, runId: _runId, ...shared }) => shared);
 const SwarmParams = Schema.Struct({
-  jobs: Schema.Array(RunParams).check(Schema.isMinLength(1), Schema.isMaxLength(SWARM_MAX)),
+  ...SharedJob.fields,
+  briefs: Schema.optionalKey(Schema.Array(Schema.String.check(Schema.isMinLength(1)))),
+  jobs: Schema.optionalKey(Schema.Array(RunParams)),
   swarmId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,47}$/u))),
 });
+
+// The default target when neither a job nor the swarm names one: research is the fleet's read-only
+// fan-out lane (Luna, think-only), the case Joel asked to be one call.
+export const SWARM_DEFAULT_WORK_TYPE = "research";
+
+// A job's target (peon or workType) replaces the shared one whole, so the two never mix.
+const jobTarget = (job: { readonly peon?: string; readonly workType?: string }) =>
+  job.peon === undefined && job.workType === undefined ? null : { ...(job.peon === undefined ? {} : { peon: job.peon }), ...(job.workType === undefined ? {} : { workType: job.workType }) };
+
+// One call: shared fields fill each job; a job's own field wins; briefs become jobs after any explicit
+// jobs. The expanded list is the swarm's identity, so the short and long forms of one swarm agree.
+export const expandSwarm = (given: typeof SwarmParams.Type): (typeof RunParams.Type)[] => {
+  const { briefs, jobs, peon, swarmId: _swarmId, workType, ...shared } = given;
+  const sharedTarget = jobTarget({ ...(peon === undefined ? {} : { peon }), ...(workType === undefined ? {} : { workType }) }) ?? { workType: SWARM_DEFAULT_WORK_TYPE };
+  const all: (typeof RunParams.Type)[] = [...(jobs ?? []), ...(briefs ?? []).map((brief) => ({ brief }))];
+  return all.map(({ peon: ownPeon, workType: ownWorkType, ...own }) => ({
+    ...shared,
+    ...own,
+    ...(jobTarget({ ...(ownPeon === undefined ? {} : { peon: ownPeon }), ...(ownWorkType === undefined ? {} : { workType: ownWorkType }) }) ?? sharedTarget),
+  }));
+};
 
 // Routing names provider/model refs; Mischief's gateway takes only its own aliases, so a {profile}
 // route maps here, before compile, and the frozen record names the model that really runs.
@@ -348,7 +372,10 @@ export const makeTools = (deps: ToolDeps) => {
 
   const peon_swarm = (raw: unknown) =>
     Effect.gen(function* peonSwarmGen() {
-      const given = yield* params("peon_swarm", SwarmParams, SWARM_SHAPE)(raw);
+      const asked = yield* params("peon_swarm", SwarmParams, SWARM_SHAPE)(raw);
+      const given = { jobs: expandSwarm(asked), ...(asked.swarmId === undefined ? {} : { swarmId: asked.swarmId }) };
+      if (given.jobs.length < 1 || given.jobs.length > SWARM_MAX)
+        {return yield* prompt({ accepted: SWARM_SHAPE, debug: DEBUG, did: `called peon_swarm with ${given.jobs.length} jobs`, fix: `pass 1 to ${SWARM_MAX} briefs or jobs; split a bigger swarm into several calls`, tag: "SwarmRefused", why: given.jobs.length < 1 ? "it named no briefs and no jobs" : `${given.jobs.length} is more than ${SWARM_MAX}` });}
       const desk = yield* deps.desk;
       const swarmId = given.swarmId ?? `swarm-${sha256(canonical(given.jobs)).slice(0, 16)}`;
       const planned = given.jobs.map((job, index) => job.runId ?? `${swarmId}-${index}`);
