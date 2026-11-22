@@ -37,7 +37,7 @@ const RunJob = Type.Object({
   scope: Type.Optional(Type.Array(Type.String())),
 });
 
-const PEON_TOOLS = ["peon_catalog", "peon_run", "peon_swarm", "peon_status", "peon_answer", "peon_verify", "workflow_define", "workflow_run"];
+const PEON_TOOLS = ["peon_catalog", "peon_run", "peon_swarm", "peon_status", "peon_read", "peon_answer", "peon_verify", "workflow_define", "workflow_run"];
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const DEBUG = "read extensions/pi/index.ts in joelhooks/peons";
@@ -161,6 +161,14 @@ export default function peons(pi: ExtensionAPI) {
     // One object, not a union: Claude-bridge sessions refuse non-object tool schemas at the first turn.
     // tools.ts still decodes exactly one of runId or swarmId.
     parameters: Type.Object({ runId: Type.Optional(Type.String()), swarmId: Type.Optional(Type.String()) }),
+  });
+  pi.registerTool({
+    annotations: { destructiveHint: false, openWorldHint: true, readOnlyHint: false },
+    description: "Read a finished run doc from this desk, defaulting to the run's frozen output. Returns text, SHA-256, byte count, and a short view and quote check for think verdicts. Docs over 60 KiB are saved under .peons/out/ without overwriting; only a preview is returned.",
+    execute: execute("peon_read"),
+    label: "Peon read",
+    name: "peon_read",
+    parameters: Type.Object({ doc: Type.Optional(Type.String()), runId: Type.String() }),
   });
   pi.registerTool({
     annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true, readOnlyHint: false },

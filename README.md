@@ -47,6 +47,7 @@ The `pi` key loads `extensions/pi`. A desk runs a peon in one call, or builds a 
 | `peon_run` | `{ workType }` or `{ peon: "<template>@<version>" }`, with a `brief` (plus optional `docs`) or an `event`, and optional `base`, `scope` and `runId`. A `{profile}` route compiles here as one think step; a `{peon}` route or template target compiles through `src/think-template.ts`, and its body must decode as a Mischief submission (no `version`: Mischief stamps it). The route is frozen in, then the run is submitted. A think run is `peon.done` only when its verdict doc decodes with the template's verdict schema. A submit 422 comes back as `peon.refused` with Mischief's errors. Idempotent on `runId`: an existing run returns its record. With no `runId`, it uses a digest of the request. |
 | `peon_swarm` | Up to 64 peons in one call, all or none. `{ briefs: ["...", "..."] }` runs each brief as a `research` peon (Luna, read-only think). Add a shared `workType` or `peon`, plus `docs`, `base`, `scope` or `model`. `jobs: [...]` (each shaped like `peon_run`) still works, and a job's own fields win. Run ids are `<swarmId>-<index>`, so a repeat call starts nothing twice. The fleet default for read-only fan-out. |
 | `peon_status` | A run's record (`running`, `peon.done`, `peon.blocked`, `peon.failed`, `peon.refused`), its Mischief state and its doc sizes. It never returns doc contents. |
+| `peon_read` | Reads a finished run's output from the calling desk, with SHA-256 and byte count. Pass `doc` to read a different run doc. |
 | `peon_answer` | `{ runId, messageId, answer }`. An ask's reply goes to `deliverReply`; a judge escalation (`announce:<key>#<n>`, choices in the blocked record) goes to `answerRun` with one of its choices. Nothing is sent unless the run awaits exactly that message. |
 | `peon_verify` | Checks a run's artifact doc, or a file by `path`, against a claimed `sha256`. A think verdict also runs `verifyQuotes`: every quote must be an exact substring of the doc it cites. Failures name sources and positions, never quotes. Commits go to `packet_verify`. |
 | `workflow_define` | Compiles a `peons.workflow.v1` definition into one Mischief plan and writes `.peons/workflows/<id>/v<version>.json`. A step is `{ id, kind: "peon", template \| workType, input: { text, from?, docs? }, gate?: "verify" \| "owner-approve", check?, failurePolicy?: "stop" }`. A `{profile}` step lists what it reads in `from`; a templated step maps each declared template input to `"input"` or an earlier step id in `docs`, and its docs are renamed per step so two steps on one template never collide. Routes freeze at define time. A version, once written, never changes. |
@@ -63,6 +64,12 @@ The run tools need a host, an identity and a desk name. A fleet desk needs no en
 `MISCHIEF_AUDIENCE` overrides the default worker audience. `retry-once-on:<tag>` is refused until Mischief can route a step failure by tag.
 
 `pnpm check:pi` type-checks `extensions/` against the installed Pi (`PI_CODING_AGENT_DIR`, else the `pi` launcher on PATH, else npm's global root). The gate is `tsc -p . && pnpm test && pnpm check:pi`.
+
+### Reading a peon's output
+
+When `peon_status` reports `peon.done`, call `peon_read({ runId: "…" })` to read the output named in the frozen run. To read another doc from the same run, pass its name as `doc`. If the name is wrong, the refusal lists the available names without showing their contents. A desk cannot read another desk's runs or read a run that is still in progress.
+
+The result gives the full doc's SHA-256 and UTF-8 byte count. A think verdict leads with the quote check, followed by a short verdict view without evidence quotes and the raw doc. For a doc over 60 KiB, the tool returns a UTF-8 preview and writes the full text under `.peons/out/<runId>/<doc>` in the desk's working directory. Run IDs with path separators are encoded as a single directory name. The export never overwrites a file; if one already exists, read it or move it aside before retrying.
 
 ## Layout
 
