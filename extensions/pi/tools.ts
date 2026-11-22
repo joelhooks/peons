@@ -7,17 +7,18 @@
 // inspect it, and submit only when the host has no such run, so a crash anywhere between submit and
 // the record costs no second submit. Nothing is cached locally.
 import nodePath from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { Effect, Option, Result, Schema } from "effect";
 
 import { Check, Checkout, PeonRequest } from "../../src/contract.ts";
-import { FROZEN_DOC, GATEWAY_MODELS, Prompt, canonical, compileRun, findThink, issuesOf, mischiefRunId, nameOf, prompt, sha256, thinkNames } from "../../src/compile.ts";
+import { DocKey, FROZEN_DOC, GATEWAY_MODELS, Prompt, canonical, compileRun, findThink, issuesOf, mischiefRunId, nameOf, prompt, sha256, thinkNames } from "../../src/compile.ts";
 import type { Compiled, FrozenStep } from "../../src/compile.ts";
 import { RouteRefused, resolveRoute } from "../../src/routing.ts";
 import type { Resolved } from "../../src/routing.ts";
-import { decodeVerdict, docText, escalationId, fromRunReport, frozenOf } from "../../src/run-report.ts";
-import { quotesOf, verifyQuotes } from "../../src/verdicts.ts";
-import type { verdicts } from "../../src/verdicts.ts";
+import { decodeVerdict, docText, escalationId, fromRunReport, frozenOf, verdictDocs } from "../../src/run-report.ts";
+import { quotesOf, verdicts, verifyQuotes } from "../../src/verdicts.ts";
+import type { Verdict } from "../../src/verdicts.ts";
 import type { Addressed, PeonRunResult, RunReport, SubmitRefused } from "../../src/run-report.ts";
 import { decodeDefinedWorkflow, defineWorkflow, failurePolicies, gates, stepKinds, workflowRun } from "../../src/workflow.ts";
 import { compositionRefused, decodeComposition, defineComposition, reconcile } from "../../src/workflow-v2.ts";
@@ -26,6 +27,7 @@ import { requiresOf } from "../../src/think-template.ts";
 import type { LoadedTemplate } from "../../src/think-template.ts";
 import type { Catalog } from "./catalog.ts";
 import type { RunHostPort } from "./host.ts";
+import { writeOutputFile } from "./output-file.ts";
 
 export interface ToolOutput {
   readonly text: string;
@@ -62,10 +64,10 @@ const params = <S extends Schema.Top & { readonly DecodingServices: never }>(too
     : Effect.succeed(decoded.success);
 };
 
-const resultText = (result: PeonRunResult): string => {
+const resultText = (result: PeonRunResult, readHint = false): string => {
   if (!("type" in result)) {return `🪓 running · ${result.runId} · ${result.template === null ? "no template" : nameOf(result.template.template, result.template.version)}. Watch it with peon_status({ runId: ${JSON.stringify(result.runId)} }).`;}
   if (result.type === "peon.done") {
-    return `✅ done · ${result.runId} · artifact ${result.artifact.kind === "doc" ? result.artifact.name : "artifact"} sha256 ${result.artifact.kind === "commit" ? result.artifact.sha : result.artifact.sha256}. Check it with peon_verify.`;
+    return `✅ done · ${result.runId} · artifact ${result.artifact.kind === "doc" ? result.artifact.name : "artifact"} sha256 ${result.artifact.kind === "commit" ? result.artifact.sha : result.artifact.sha256}. Check it with peon_verify.${readHint ? ` Read it with peon_read({ runId: ${JSON.stringify(result.runId)} }).` : ""}`;
   }
   if (result.type === "peon.blocked") {
     return `⏸ blocked · ${result.runId} · step ${result.step} · message ${result.messageId}\n${result.question}${result.choices.length === 0 ? "" : `\nChoices: ${result.choices.join(", ")}`}`;
@@ -76,10 +78,10 @@ const resultText = (result: PeonRunResult): string => {
   return `${result.tag}: run ${result.runId} was refused before it started\nAccepted: ${result.accepted}\nFix: ${result.fix}\nDebug: ${result.debug}`;
 };
 
-const output = (result: PeonRunResult, extra: Record<string, unknown> = {}): ToolOutput => ({
+const output = (result: PeonRunResult, extra: Record<string, unknown> = {}, readHint = false): ToolOutput => ({
   data: { result, ...extra },
   isError: "type" in result && result.type === "peon.refused",
-  text: resultText(result),
+  text: resultText(result, readHint),
 });
 
 const refusedRecord = (request: Addressed, template: string, route: FrozenStep["route"], refused: Prompt): PeonRunResult => ({
@@ -248,8 +250,7 @@ const quoteDetail = (decoded: ReturnType<typeof decodeVerdict>, writes: string, 
   return `${bad.length} of ${quotes.length} quotes are not exact substrings of the docs they cite: ${where.join(", ")}`;
 };
 
-const quoteCheckOf = (report: RunReport, writes: string, verdictName: keyof typeof verdicts, cites: Readonly<Record<string, string>>, doc: Schema.Json) => {
-  const decoded = decodeVerdict(verdictName, doc);
+const quoteCheckOf = (report: RunReport, writes: string, verdictName: keyof typeof verdicts, cites: Readonly<Record<string, string>>, decoded: ReturnType<typeof decodeVerdict>) => {
   const docs = Object.fromEntries(Object.entries(cites).flatMap(([cited, held]) => (report.docs[held] === undefined ? [] : [[cited, docText(report.docs[held])]])));
   const quotes = decoded.ok ? quotesOf(decoded.verdict) : [];
   const bad = decoded.ok ? verifyQuotes(decoded.verdict, docs) : [];
@@ -258,6 +259,72 @@ const quoteCheckOf = (report: RunReport, writes: string, verdictName: keyof type
     name: `verdict-quotes:${writes}`,
     outcome: decoded.ok && bad.length === 0 ? "pass" : "fail",
   });
+};
+
+const READ_LIMIT = 60 * 1024;
+const VIEW_LIMIT = 4 * 1024;
+const utf8Prefix = (bytes: Buffer, limit: number): string => new StringDecoder("utf-8").write(bytes.subarray(0, limit));
+const outputRunDir = (runId: string): string => {
+  const escaped = encodeURIComponent(runId);
+  // A legal run ID with many separators can exceed a filesystem's 255-byte component limit.
+  return escaped.length <= 255 ? escaped : `%${Buffer.from(runId).toString("base64url")}`;
+};
+
+const VerdictJson = Schema.Union(Object.values(verdicts));
+const parseVerdict = Schema.decodeUnknownOption(VerdictJson);
+const parseVerdictText = Schema.decodeUnknownOption(Schema.fromJsonString(VerdictJson));
+
+const verdictSections = (value: Verdict): { claims: readonly string[]; counts: string } => {
+  switch (value.schema) {
+    case "peons.verdict.change-review.v1": {
+      return {
+        claims: [`Verdict: ${value.verdict}`, "Blockers:", ...value.blockers.map(({ claim }, index) => `${index + 1}. ${claim}`), "Findings:", ...value.findings.map(({ claim }) => `- ${claim}`)],
+        counts: `Checked: ${value.checked.length} · Unverified: ${value.unverified.length}`,
+      };
+    }
+    case "peons.verdict.investigation.v1": {
+      return {
+        claims: [`Verdict: ${value.answer} (${value.confidence} confidence)`, "Findings:", ...value.findings.map(({ claim }) => `- ${claim}`)],
+        counts: `Measured findings: ${value.findings.filter(({ measured }) => measured).length} · Unmeasured items: ${value.unmeasured.length}`,
+      };
+    }
+    case "peons.verdict.dead-code.v1":
+    case "peons.verdict.dead-code.v2": {
+      return {
+        claims: ["Verdict: dead-code review", "Findings:", ...value.items.map(({ id, verdict: decision }) => `- ${id}: ${decision}`)],
+        counts: `Items: ${value.items.length} · Unsure: ${value.items.filter((item) => item.verdict === "unsure").length}`,
+      };
+    }
+    default: {
+      const unexpected: never = value;
+      return unexpected;
+    }
+  }
+};
+
+const verdictView = (value: Verdict): string => {
+  const { claims, counts } = verdictSections(value);
+  const bytes = Buffer.from(claims.join("\n"));
+  const view = bytes.length > VIEW_LIMIT ? `${utf8Prefix(bytes, VIEW_LIMIT)}\n[View clipped]` : bytes.toString("utf-8");
+  return `${view}\n${counts}`;
+};
+
+const readResult = ({ name, doc, step, report, bytes, text, path }: { name: string; doc: Schema.Json; step: FrozenStep | undefined; report: RunReport; bytes: Buffer; text: string; path: string | null }): ToolOutput => {
+  const declared = step !== undefined && step.verdict !== null
+    ? { cites: step.cites, decoded: decodeVerdict(step.verdict, doc, verdictDocs(step, report.docs)), name: step.verdict }
+    : null;
+  const check = declared === null ? null : quoteCheckOf(report, name, declared.name, declared.cites, declared.decoded);
+  const view = declared?.decoded.ok === true ? declared.decoded.verdict : Option.getOrNull(typeof doc === "string" ? parseVerdictText(doc) : parseVerdict(doc));
+  const digest = sha256(bytes);
+  const lines = [
+    ...(check === null ? [] : [`${outcomeIcon[check.outcome]} ${check.name}: ${check.detail}`]),
+    `${name} · sha256 ${digest} · ${bytes.length} bytes`,
+    ...(view === null ? [] : [verdictView(view)]),
+    ...(path === null ? [] : [`Full doc: ${path} · showing up to ${READ_LIMIT} UTF-8 bytes`]),
+    "",
+    path === null ? text : utf8Prefix(bytes, READ_LIMIT),
+  ];
+  return { data: { bytes: bytes.length, check, doc: name, path, sha256: digest }, isError: check?.outcome === "fail", text: lines.join("\n") };
 };
 
 const listing = (entry: { readonly runnable: boolean; readonly digest: string | null; readonly cellReady: boolean }): string => {
@@ -443,7 +510,7 @@ export const makeTools = (deps: ToolDeps) => {
         ), { concurrency: 4 });
       const counts: Record<string, number> = {};
       for (const result of results) {counts[swarmKind(result)] = (counts[swarmKind(result)] ?? 0) + 1;}
-      const lines = results.map((result, index) => `${index}. ${result === null ? `missing · ${runIds[index] ?? ""}` : (resultText(result).split("\n")[0] ?? "")}`);
+      const lines = results.map((result, index) => `${index}. ${result === null ? `missing · ${runIds[index] ?? ""}` : (resultText(result, true).split("\n")[0] ?? "")}`);
       return { data: { counts, results, swarmId }, isError: false, text: [`🪓 swarm ${swarmId} · ${Object.entries(counts).map(([name, count]) => `${count} ${name}`).join(" · ")}`, ...lines].join("\n") };
     });
 
@@ -456,7 +523,7 @@ export const makeTools = (deps: ToolDeps) => {
       const result = fromRunReport(report, { desk, runId: given.runId });
       const docs = Object.fromEntries(Object.entries(report.docs).filter(([name]) => name !== FROZEN_DOC).map(([name, doc]) => [name, Buffer.byteLength(docText(doc), "utf-8")]));
       const status = { awaiting: (report.awaiting ?? []).map(({ messageId, to }) => ({ messageId, to })), docBytes: docs, failures: (report.failures ?? []).map(({ key }) => key), planVersion: report.planVersion, state: report.value, status: report.status, thinking: report.thinking?.line ?? null, transitions: report.transitions };
-      const out = output(result, { run: status });
+      const out = output(result, { run: status }, true);
       return { ...out, text: `${out.text}\nMischief: ${report.status} at ${report.value ?? "no state"} · ${report.transitions} transitions${report.thinking === undefined ? "" : ` · ${report.thinking.line}`}` };
     }).pipe(finish("peon_status"));
 
@@ -495,6 +562,45 @@ export const makeTools = (deps: ToolDeps) => {
       return output(fromRunReport(delivered, { desk, runId: given.runId }));
     }).pipe(finish("peon_answer"));
 
+  const peon_read = (raw: unknown) =>
+    Effect.gen(function* peonReadGen() {
+      const given = yield* params("peon_read", Schema.Struct({ doc: Schema.optionalKey(NonEmpty), runId: NonEmpty }), '{ runId: "<id>", doc?: "<doc name>" }')(raw);
+      const { desk, id, report } = yield* inspected("peon_read", given.runId);
+      const debug = `inspectRun({ runId: ${JSON.stringify(id)} })`;
+      const did = `called peon_read for run ${JSON.stringify(given.runId)}`;
+      const frozen = frozenOf(report);
+      if (frozen?.desk !== desk || frozen.runId !== given.runId) {
+        return yield* prompt({ accepted: "a run belonging to this desk", debug, did, fix: "use a runId returned to this desk by peon_run or workflow_run", tag: "UnknownRun", why: "the run's frozen record does not match this desk and runId" });
+      }
+      if (report.status !== "done" || report.value === "rejected") {
+        return yield* prompt({ accepted: "a finished, non-rejected run", debug, did, fix: `call peon_status({ runId: ${JSON.stringify(given.runId)} })`, tag: "ReadRefused", why: report.value === "rejected" ? "the run was rejected" : `the run is ${report.status}` });
+      }
+      const name = given.doc ?? frozen.writes;
+      const doc = Object.hasOwn(report.docs, name) ? report.docs[name] : undefined;
+      if (doc === undefined) {
+        const names = Object.keys(report.docs).toSorted().map((key) => JSON.stringify(key));
+        return yield* prompt({ accepted: names.join(", ") || "none: the run has no docs", debug, did, fix: "call peon_read with one of the listed doc names", tag: "DocMissing", why: `the run has no doc named ${JSON.stringify(name)}` });
+      }
+      // In v1 workflows a step's output doc is named after the step. A standalone run uses writes.
+      const stepKey = name === frozen.writes ? frozen.final : name;
+      const step = Object.hasOwn(frozen.steps, stepKey) ? frozen.steps[stepKey] : undefined;
+      const text = docText(doc);
+      const bytes = Buffer.from(text);
+      let path: string | null = null;
+      if (bytes.length > READ_LIMIT) {
+        if (!Schema.is(DocKey)(name)) {
+          return yield* prompt({ accepted: "a run doc with a valid doc key for a local filename", debug, did, fix: "use a listed output doc key", tag: "ReadRefused", why: "the large doc's name is not safe to write as a filename" });
+        }
+        path = nodePath.join(deps.cwd, ".peons", "out", outputRunDir(frozen.runId), name);
+        const target = path;
+        yield* Effect.tryPromise({
+          catch: () => prompt({ accepted: "a new writable output path under this working directory", debug: target, did, fix: "if an export already exists, read it or move it aside before retrying; otherwise check the directory and permissions", tag: "FileUnwritable", why: "the export path already exists or the filesystem refused it" }),
+          try: async () => {await writeOutputFile({ cwd: deps.cwd, path: target, text });},
+        });
+      }
+      return readResult({ bytes, doc, name, path, report, step, text });
+    }).pipe(finish("peon_read"));
+
   const VERIFY_SHAPE = '{ runId: "<id>", sha256?: "<claimed>" } | { path: "<file>", sha256: "<claimed>" }';
   const peon_verify = (raw: unknown) =>
     Effect.gen(function* peonVerifyGen() {
@@ -520,7 +626,7 @@ export const makeTools = (deps: ToolDeps) => {
       if (step === undefined || step.verdict === null) {return sha;}
       // A think verdict: every quote must be an exact substring of the doc it cites. The check names
       // sources and positions, never the quotes, so no customer text leaves the run.
-      const quoteCheck = quoteCheckOf(report, frozen.writes, step.verdict, step.cites, doc);
+      const quoteCheck = quoteCheckOf(report, frozen.writes, step.verdict, step.cites, decodeVerdict(step.verdict, doc));
       const shaCheck = typeof sha.data === "object" && sha.data !== null && "check" in sha.data ? sha.data.check : null;
       const failed = sha.isError || quoteCheck.outcome === "fail";
       return { data: { checks: [shaCheck, quoteCheck].filter((check) => check !== null) }, isError: failed, text: `${sha.text}\n${outcomeIcon[quoteCheck.outcome]} ${quoteCheck.name}: ${quoteCheck.detail}` };
@@ -643,5 +749,5 @@ export const makeTools = (deps: ToolDeps) => {
       return output(result, { mischiefRunId: compiled.runId, workflow: { digest: defined.digest, id: defined.definition.id, version: defined.definition.version } });
     }).pipe(finish("workflow_run"));
 
-  return { peon_answer, peon_catalog, peon_run, peon_status, peon_swarm, peon_verify, workflow_define, workflow_run };
+  return { peon_answer, peon_catalog, peon_read, peon_run, peon_status, peon_swarm, peon_verify, workflow_define, workflow_run };
 };
