@@ -107,7 +107,7 @@ export const loadCatalog = (root: string): Effect.Effect<Catalog, string> =>
       const loaded = yield* Effect.result(loadThink(dir));
       if (Result.isFailure(loaded)) {problems.push(loaded.failure);}
       else {
-        think.push(loaded.success);
+        think.push(entry.requires === undefined ? loaded.success : { ...loaded.success, catalogRequires: entry.requires });
         problems.push(...drift(entry, loaded.success));
       }
     }

@@ -161,6 +161,11 @@ export const PeonRecord = Schema.Union([PeonDone, PeonBlocked, PeonFailed, PeonR
 
 export const PeonRunResult = Schema.Union([PeonHandle, PeonRecord]);
 
+export const RuntimeCapabilities = Schema.Array(NonEmpty);
+
+// Omit rather than materialize [] in decoded templates: their canonical spec is hashed.
+export const Requires = Schema.optionalKey(RuntimeCapabilities);
+
 export const CatalogEntry = Schema.Struct({
   cellReady: Schema.Boolean,
   evidence: Schema.Struct({ count: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), repoCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), source: NonEmpty }),
@@ -171,6 +176,7 @@ export const CatalogEntry = Schema.Struct({
   output: NonEmpty,
   owner: DeskName,
   refusals: Schema.Array(NonEmpty),
+  requires: Requires,
   summary: NonEmpty,
   template: Slug,
   thinking: Schema.Literals(["low", "medium", "high", "xhigh", "max"]),

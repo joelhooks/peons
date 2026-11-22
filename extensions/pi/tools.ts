@@ -22,6 +22,7 @@ import type { Addressed, PeonRunResult, RunReport, SubmitRefused } from "../../s
 import { decodeDefinedWorkflow, defineWorkflow, failurePolicies, gates, stepKinds, workflowRun } from "../../src/workflow.ts";
 import { compositionRefused, decodeComposition, defineComposition, reconcile } from "../../src/workflow-v2.ts";
 import type { DefinedComposition, Reconciled } from "../../src/workflow-v2.ts";
+import { requiresOf } from "../../src/think-template.ts";
 import type { LoadedTemplate } from "../../src/think-template.ts";
 import type { Catalog } from "./catalog.ts";
 import type { RunHostPort } from "./host.ts";
@@ -301,11 +302,15 @@ export const makeTools = (deps: ToolDeps) => {
     params("peon_catalog", Schema.Struct({}), "{}")(raw ?? {}).pipe(
       Effect.map((): ToolOutput => {
         const runnable = new Set(thinkNames(catalog.think));
-        const entries = catalog.entries.map((entry) => ({ cellReady: entry.cellReady, digest: findThink(catalog.think, nameOf(entry.template, entry.version))?.digest ?? null, kind: entry.kind, model: entry.model, needs: entry.needs, runnable: runnable.has(nameOf(entry.template, entry.version)), summary: entry.summary, template: entry.template, thinking: entry.thinking, version: entry.version }));
+        const entries = catalog.entries.map((entry) => {
+          const loaded = findThink(catalog.think, nameOf(entry.template, entry.version));
+          const requires = loaded === undefined ? entry.requires : requiresOf(loaded);
+          return { cellReady: entry.cellReady, digest: loaded?.digest ?? null, kind: entry.kind, model: entry.model, needs: entry.needs, ...(requires === undefined ? {} : { requires }), runnable: runnable.has(nameOf(entry.template, entry.version)), summary: entry.summary, template: entry.template, thinking: entry.thinking, version: entry.version };
+        });
         const routes = Object.entries(catalog.routing.routes).map(([concept, route]) => ({ concept, specialist: route.specialist, status: route.status, why: route.why }));
         const lines = [
           `🪓 ${entries.length} catalog peons (${runnable.size} runnable), ${routes.length} routes (table v${catalog.routing.version}); outcome rates are unmeasured until outcome events land.`,
-          ...entries.map((entry) => `- ${nameOf(entry.template, entry.version)} · ${entry.kind} · ${entry.model} ${entry.thinking} · ${listing(entry)}`),
+          ...entries.map((entry) => `- ${nameOf(entry.template, entry.version)} · ${entry.kind} · ${entry.model} ${entry.thinking} · ${listing(entry)}${entry.requires === undefined || entry.requires.length === 0 ? "" : ` · requires ${entry.requires.join(", ")}`}`),
           ...catalog.unlisted.map((tool) => `- ${nameOf(tool.template, tool.version)} · tool peon, not in catalog.json · ${tool.model} ${tool.thinking} · digest ${tool.digest.slice(0, 12)} · not run by peon_run`),
           ...routes.map((route) => `- ${route.concept} → ${"peon" in route.specialist ? route.specialist.peon : `${route.specialist.profile.model} ${route.specialist.profile.thinking}`} (${route.status})`),
           ...catalog.problems.map((problem) => `! ${problem}`),
