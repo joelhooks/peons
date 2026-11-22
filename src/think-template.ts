@@ -5,10 +5,11 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import nodePath from "node:path";
 
-import { Schema } from "effect";
+import { Effect, Result, Schema } from "effect";
 
 import type { PeonRequest } from "./contract.ts";
-import { PeonRefused } from "./contract.ts";
+import { PeonRefused, Requires } from "./contract.ts";
+import { mischiefRuntimes, place } from "./placement.ts";
 import { VerdictName } from "./verdicts.ts";
 
 const Sha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -28,6 +29,7 @@ export const ThinkTemplate = Schema.Struct({
   owner: Schema.String,
   profile: Schema.Struct({ model: ThinkModel, thinking: Schema.Literals(["low", "medium", "high", "xhigh", "max"]) }),
   prompt: Schema.Struct({ path: RelPath, sha256: Sha256 }),
+  requires: Requires,
   schema: Schema.Literal("peons.think-template.v1"),
   template: Slug,
   version: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
@@ -39,11 +41,18 @@ export const ThinkTemplate = Schema.Struct({
 export type ThinkTemplate = typeof ThinkTemplate.Type;
 
 export interface LoadedTemplate {
+  readonly catalogRequires?: readonly string[];
   readonly spec: ThinkTemplate;
   readonly digest: string;
   readonly warmup: Readonly<Record<string, string>>;
   readonly prompt: string;
 }
+
+// Either declaration can restrict placement. Catalog metadata does not mutate the hashed spec.
+export const requiresOf = ({ spec, catalogRequires }: LoadedTemplate): readonly string[] | undefined =>
+  spec.requires === undefined || catalogRequires === undefined
+    ? spec.requires ?? catalogRequires
+    : [...new Set([...spec.requires, ...catalogRequires])];
 
 export const COMPILER = "peons.think-compile.v1";
 
@@ -107,6 +116,16 @@ export const compile = (loaded: LoadedTemplate, request: PeonRequest): Compiled 
 
   if (request.target.kind !== "template" || request.target.template !== spec.template || (request.target.version !== null && request.target.version !== spec.version)) {
     return refuse(request, "TemplateMismatch", named, `peon_run({ target: { kind: "template", template: "${spec.template}", version: ${spec.version} } }), or resolve the route to this template first`, `asked for ${JSON.stringify(request.target)}`);
+  }
+
+  const requires = requiresOf(loaded);
+  if (requires !== undefined && requires.length > 0) {
+    // The only dispatch today is Mischief, whose available slots are not capped here.
+    const placement = Effect.runSync(Effect.result(place({ requires, runtimes: mischiefRuntimes })));
+    if (Result.isFailure(placement)) {
+      const error = placement.failure;
+      return refuse(request, error._tag, `a runtime declaring ${JSON.stringify(error.requires)}`, error.fix, `no runtime declares all capabilities required by ${named}`);
+    }
   }
 
   if (request.input.kind !== "brief") {
