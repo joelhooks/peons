@@ -28,7 +28,7 @@ const JobsOnly = Schema.Struct({ jobs: Schema.Array(Schema.Unknown) });
 
 const eagerSwarm = (): Swarm => (host, raw) =>
   Effect.gen(function* eagerGen() {
-    const { jobs } = Schema.decodeUnknownSync(JobsOnly)(raw);
+    const { jobs } = yield* Schema.decodeUnknownEffect(JobsOnly)(raw).pipe(Effect.orDie);
     const tools = toolsWith(host);
     let isError = false;
     for (const one of jobs) {isError = (yield* tools.peon_run(one)).isError || isError;}
