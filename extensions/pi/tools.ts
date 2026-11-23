@@ -11,7 +11,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import { Effect, Option, Result, Schema } from "effect";
 
-import { Check, Checkout, PeonRequest } from "../../src/contract.ts";
+import { Brief, Check, Checkout, PeonRequest } from "../../src/contract.ts";
 import { DocKey, FROZEN_DOC, GATEWAY_MODELS, Prompt, canonical, compileRun, findThink, issuesOf, mischiefRunId, nameOf, prompt, sha256, thinkNames } from "../../src/compile.ts";
 import type { Compiled, FrozenStep } from "../../src/compile.ts";
 import { RouteRefused, resolveRoute } from "../../src/routing.ts";
@@ -136,6 +136,22 @@ const RunParams = Schema.Struct({
   scope: Schema.optionalKey(Schema.Array(Schema.String)),
   workType: Schema.optionalKey(Schema.String),
 });
+
+const isBriefDocSlug = Schema.is(Brief.fields.docs.key);
+const checkDocSlugs = (tool: string, field: string, docs: Readonly<Record<string, string>> | undefined) => {
+  const bad = Object.keys(docs ?? {}).find((slug): boolean => !isBriefDocSlug(slug));
+  if (bad === undefined) {return Effect.void;}
+  const normalized = bad.toLowerCase().replaceAll(/[^a-z0-9-]/gu, "-").replace(/^[^a-z]+/u, "").slice(0, 48);
+  const suggested = normalized === "" ? "doc" : normalized;
+  return Effect.fail(prompt({
+    accepted: "doc slugs matching ^[a-z][a-z0-9-]{0,47}$ (1–48 characters, starting with a lowercase letter)",
+    debug: "read src/contract.ts Brief.docs in joelhooks/peons",
+    did: `called ${tool}`,
+    fix: `rename ${JSON.stringify(bad)} to ${JSON.stringify(suggested)} in ${field} and retry`,
+    tag: "ParamsRefused",
+    why: `${field} slug ${JSON.stringify(bad)} does not match the doc slug rule`,
+  }));
+};
 
 const SwarmJob = Schema.Struct({ digest: Schema.String, runId: Schema.String });
 const SwarmManifest = Schema.Union([
@@ -278,7 +294,7 @@ const verdictSections = (value: Verdict): { claims: readonly string[]; counts: s
   switch (value.schema) {
     case "peons.verdict.change-review.v1": {
       return {
-        claims: [`Verdict: ${value.verdict}`, "Blockers:", ...value.blockers.map(({ claim }, index) => `${index + 1}. ${claim}`), "Findings:", ...value.findings.map(({ claim }) => `- ${claim}`)],
+        claims: [`Verdict: ${value.verdict}`, "Blockers:", ...value.blockers.map(({ claim }, index) => /^\s*\d+[.)]\s/u.test(claim) ? claim : `${index + 1}. ${claim}`), "Findings:", ...value.findings.map(({ claim }) => `- ${claim}`)],
         counts: `Checked: ${value.checked.length} · Unverified: ${value.unverified.length}`,
       };
     }
@@ -434,6 +450,7 @@ export const makeTools = (deps: ToolDeps) => {
   const peon_run = (raw: unknown) =>
     Effect.gen(function* peonRunGen() {
       const given = yield* params("peon_run", RunParams, RUN_SHAPE)(raw);
+      yield* checkDocSlugs("peon_run", "docs", given.docs);
       const desk = yield* deps.desk;
       const prepared = yield* runOf("peon_run", given, desk, (content) => `auto-${sha256(canonical(content)).slice(0, 24)}`);
       if ("refused" in prepared) {return prepared.refused;}
@@ -445,6 +462,10 @@ export const makeTools = (deps: ToolDeps) => {
   const peon_swarm = (raw: unknown) =>
     Effect.gen(function* peonSwarmGen() {
       const asked = yield* params("peon_swarm", SwarmParams, SWARM_SHAPE)(raw);
+      yield* checkDocSlugs("peon_swarm", "docs", asked.docs);
+      for (const [index, job] of (asked.jobs ?? []).entries()) {
+        yield* checkDocSlugs("peon_swarm", `jobs[${index}].docs`, job.docs);
+      }
       const given = { jobs: expandSwarm(asked), ...(asked.swarmId === undefined ? {} : { swarmId: asked.swarmId }) };
       if (given.jobs.length < 1 || given.jobs.length > SWARM_MAX)
         {return yield* prompt({ accepted: SWARM_SHAPE, debug: DEBUG, did: `called peon_swarm with ${given.jobs.length} jobs`, fix: `pass 1 to ${SWARM_MAX} briefs or jobs; split a bigger swarm into several calls`, tag: "SwarmRefused", why: given.jobs.length < 1 ? "it named no briefs and no jobs" : `${given.jobs.length} is more than ${SWARM_MAX}` });}
