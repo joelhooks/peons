@@ -56,6 +56,17 @@ describe("peon_read", () => {
     expect(out.text).toContain(`Verdict: block\nBlockers:\n1. Needs a fence\nFindings:\n- Good name\nChecked: 1 · Unverified: 2\n\n${raw}`);
   });
 
+  it("does not add a second number to an already numbered blocker", async () => {
+    const { docs, fake, id, tools } = await start();
+    const evidence = [{ quote: "a quote", source: "subject" }];
+    const raw = canonical({ ...review("a quote"), blockers: [{ claim: "1. Needs a fence", evidence }, { claim: "Needs a test", evidence }] });
+    fake.patch(id, { docs: { ...docs, artifact: raw }, status: "done" });
+    const out = await run(tools.peon_read({ runId: "scan" }));
+    expect(out.isError).toBe(false);
+    expect(out.text).toContain("Blockers:\n1. Needs a fence\n2. Needs a test\nFindings:");
+    expect(out.text.endsWith(`\n\n${raw}`)).toBe(true);
+  });
+
   it("exports the full text privately, returns a valid UTF-8 prefix, and never overwrites", withTempDir(async (cwd) => {
     const runId = "scan/a";
     const { docs, fake, id, tools } = await start(runId, cwd);

@@ -58,6 +58,33 @@ describe("peon_swarm one call", () => {
   });
 });
 
+describe("peon tool doc slugs", () => {
+  it.each([
+    ["source_text", "source-text"],
+    ["Source-text", "source-text"],
+    ["12source-text", "source-text"],
+    ["123", "doc"],
+    ["a".repeat(49), "a".repeat(48)],
+  ])("refuses %j and suggests %j before contacting the host", async (slug, suggested) => {
+    const fake = fakeHost();
+    const tools = toolsWith(fake.host);
+    const docs = { [slug]: "source" };
+    const results = await Promise.all([
+      run(tools.peon_run({ brief: "Read this", docs, workType: "scan" })),
+      run(tools.peon_swarm({ jobs: [{ brief: "Valid sibling" }, { brief: "Read this", docs }], workType: "scan" })),
+      run(tools.peon_swarm({ briefs: ["Read this"], docs, workType: "scan" })),
+    ]);
+    for (const [index, out] of results.entries()) {
+      expect(out.isError).toBe(true);
+      expect(out.text).toContain(`${index === 1 ? "jobs[1].docs" : "docs"} slug ${JSON.stringify(slug)}`);
+      expect(out.text).toContain("^[a-z][a-z0-9-]{0,47}$");
+      expect(out.text).toContain(`Fix: rename ${JSON.stringify(slug)} to ${JSON.stringify(suggested)}`);
+    }
+    expect(fake.calls.inspect).toEqual([]);
+    expect(fake.calls.submit).toEqual([]);
+  });
+});
+
 describe("fleet defaults", () => {
   it("names the identity by Lockjaw's fleet convention from the Rat King name", () => {
     expect(identitySecretOf("aihero-perf/desk")).toBe("rat_king_fleet_agent_aihero-perf.desk_identity");
