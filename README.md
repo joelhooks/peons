@@ -71,6 +71,10 @@ When `peon_status` reports `peon.done`, call `peon_read({ runId: "…" })` to re
 
 The result gives the full doc's SHA-256 and UTF-8 byte count. A think verdict leads with the quote check, followed by a short verdict view without evidence quotes and the raw doc. For a doc over 60 KiB, the tool returns a UTF-8 preview and writes the full text under `.peons/out/<runId>/<doc>` in the desk's working directory. Run IDs with path separators are encoded as a single directory name. The export never overwrites a file; if one already exists, read it or move it aside before retrying.
 
+### Running a box matrix
+
+Use the [box-swarm runner](scripts/box-swarm/README.md) when each test cell needs its own Mischief box. It runs bounded concurrent cells, saves results and evidence under `runs/box-swarm/`, and skips completed cells on rerun. `peon_swarm` is for read-only think peons.
+
 ## Layout
 
 ```
