@@ -1,12 +1,14 @@
 import { Buffer } from "node:buffer";
-import { mkdtemp, readFile, readdir, rm, unlink } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { setImmediate, setTimeout } from "node:timers/promises";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { evidenceLimit, parseMatrix, WorkerRefusalError } from "../scripts/box-swarm/protocol.ts";
+import { evidenceLimit, matrixDigest, parseMatrix, WorkerRefusalError } from "../scripts/box-swarm/protocol.ts";
 import type { Report, WorkerPort } from "../scripts/box-swarm/protocol.ts";
 import { runSwarm } from "../scripts/box-swarm/runner.ts";
 
@@ -22,7 +24,7 @@ const fakeWorker = (output = verdict) => {
   const active = new Set<string>();
   const pending = new Map<string, string>();
   const done = new Map<string, Report>();
-  const stats = { max: 0 };
+  const stats = { max: 0, started: 0 };
   const worker = {
     destroy: vi.fn<WorkerPort["destroy"]>(async ({ peonId }) => { await setImmediate(); active.delete(peonId); }),
     inspect: vi.fn<WorkerPort["inspect"]>(async (peonId) => {
@@ -43,6 +45,8 @@ const fakeWorker = (output = verdict) => {
     }),
     spawn: vi.fn<WorkerPort["spawn"]>(async ({ peonId }) => {
       await setImmediate();
+      // Mischief deduplicates by its internal request ID, spawn/<peonId>.
+      if (!active.has(peonId)) { stats.started += 1; }
       active.add(peonId);
       stats.max = Math.max(stats.max, active.size);
       return done.get(peonId) ?? report(peonId);
@@ -59,8 +63,7 @@ const testClock = {
   pollMs: 1,
   sleep: async (ms: number) => {
     delays.push(ms);
-    // Count polling waits only; capacity waits can overlap on separate slots.
-    if (ms === 1) { elapsed += 1; }
+    elapsed += ms;
     await setImmediate();
   },
   turnTimeoutMs: 50,
@@ -187,11 +190,121 @@ describe("box swarm", () => {
     expect(worker.prompt).toHaveBeenCalledTimes(1);
   });
 
+  it("records TurnLost when the matching pending prompt clears but its previous turn is unchanged", async () => {
+    const { worker } = fakeWorker();
+    const old = report("suite-a", { exit: 0, output: verdict("a"), usage: { total: 42 }, wallMs: 1 });
+    worker.spawn.mockResolvedValue(old);
+    worker.inspect.mockImplementationOnce(async () => {
+      await setImmediate();
+      const requestId = worker.prompt.mock.calls[0]?.[0].requestId;
+      if (requestId === undefined) { throw new Error("Expected a prompt before inspect"); }
+      return { ...old, pending: { kind: "prompt", requestId }, state: "running" };
+    }).mockResolvedValue(old);
+    expect(await run(worker, matrix(["a"]))).toMatchObject({ fault: 1, pass: 0 });
+    expect(await file("a", "result.json")).toContain("TurnLost:");
+    expect(worker.inspect).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts completion through inspect exactly once after the prompt connection drops", async () => {
+    const { worker } = fakeWorker();
+    const completed = report("suite-a", { exit: 0, output: verdict("a"), usage: { total: 42 }, wallMs: 1 });
+    worker.prompt.mockRejectedValueOnce(new Error("connection dropped"));
+    worker.inspect.mockResolvedValueOnce(completed);
+    expect(await run(worker, matrix(["a"]))).toMatchObject({ fault: 0, pass: 1 });
+    expect(worker.prompt).toHaveBeenCalledTimes(1);
+    expect(worker.inspect).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses changed matrix contents and any cell result with a different digest before making calls", async () => {
+    const { worker } = fakeWorker();
+    const input = matrix(["a", "b"]);
+    const first = await run(worker, input);
+    expect(await file("matrix.sha256")).toBe(`${first.matrixSha256}\n`);
+    const original = await file("summary.json");
+    const saved = await file("a", "result.json");
+    expect(saved).toContain(first.matrixSha256);
+    await expect(run(worker, { ...input, cells: [{ ...cell("a"), turns: ["different"] }, cell("b")] })).rejects.toThrow("use a new swarm ID, e.g. suite-next");
+    await writeFile(path.join(root, swarmId, "a", "result.json"), saved.replace(first.matrixSha256, "0".repeat(64)));
+    await expect(run(worker, input)).rejects.toThrow("Cell a has a missing or different matrix digest");
+    expect(await file("summary.json")).toBe(original);
+    expect(worker.spawn).toHaveBeenCalledTimes(2);
+    expect(worker.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases a slot after the capacity wait expires and always writes the summary", async () => {
+    const { worker } = fakeWorker();
+    const spawn = worker.spawn.getMockImplementation();
+    if (spawn === undefined) { throw new Error("Missing fake spawn implementation"); }
+    worker.spawn.mockImplementation(async (input) => {
+      if (input.peonId === "suite-a") { throw new WorkerRefusalError(429, "CapacityFull", "all boxes in use"); }
+      return await spawn(input);
+    });
+    expect(await run(worker, { ...matrix(["a", "b"]), capacityWaitMs: 2500, concurrency: 1 })).toMatchObject({ fault: 1, pass: 1 });
+    expect(delays).toEqual([1000, 1500, 1, 1]);
+    expect(await file("a", "result.json")).toContain("CapacityTimeout:");
+    expect(await file("SUMMARY.md")).toContain("1 pass · 0 fail · 1 fault");
+  });
+
+  it("reattaches after a crash between remote spawn and the local spawn receipt", async () => {
+    const { stats, worker } = fakeWorker();
+    const input = matrix(["a"]);
+    const spawn = { overrides: { model: input.model, workspace: input.workspace }, peonId: "suite-a", template: { name: "full", version: 1 } } satisfies Parameters<WorkerPort["spawn"]>[0];
+    // Simulate the remote side having committed spawn/suite-a before the client persisted spawned.json.
+    await mkdir(path.join(root, swarmId, "a"), { recursive: true });
+    await writeFile(path.join(root, swarmId, "matrix.sha256"), `${matrixDigest(parseMatrix(input, swarmId))}\n`);
+    await worker.spawn(spawn);
+    expect(await run(worker, input)).toMatchObject({ fault: 0, pass: 1 });
+    expect(worker.spawn.mock.calls).toEqual([[spawn], [spawn]]);
+    expect(stats.started).toBe(1);
+    expect(worker.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs only missing teardown after a crash with result.json already saved", async () => {
+    const { worker } = fakeWorker();
+    const input = matrix(["a"]);
+    // This is the on-disk state of a crash after result.json, before a discard attempt.
+    await run(worker, input);
+    const saved = await file("a", "result.json");
+    const resumed = await run(worker, input, true);
+    expect(resumed.cells[0]).toMatchObject({ pass: true, resumed: true, teardown: { status: "destroyed" } });
+    expect(await file("a", "result.json")).toBe(saved);
+    expect(worker.spawn).toHaveBeenCalledTimes(1);
+    expect(worker.prompt).toHaveBeenCalledTimes(1);
+    expect(worker.inspect).toHaveBeenCalledTimes(2);
+    expect(worker.destroy).toHaveBeenCalledExactlyOnceWith({ discardWorkspace: true, peonId: "suite-a" });
+  });
+
+  it("clears a dead PID lock with a message and never steals a live lock", async () => {
+    const { worker } = fakeWorker();
+    const input = matrix(["a"]);
+    await mkdir(path.join(root, swarmId));
+    const lock = path.join(root, swarmId, ".runner.lock");
+    await writeFile(lock, `${process.pid}\n`);
+    await expect(run(worker, input)).rejects.toThrow(`locked by live PID ${process.pid}`);
+    expect(await file(".runner.lock")).toBe(`${process.pid}\n`);
+    expect(worker.spawn).not.toHaveBeenCalled();
+    const child = spawnSync(process.execPath, ["-e", ""], { timeout: 5000 });
+    expect(child.status).toBe(0);
+    await writeFile(lock, `${child.pid}\n`);
+    const logging = vi.spyOn(console, "error").mockImplementation(() => {
+      // Capture the recovery notice instead of printing it during the test.
+    });
+    try {
+      expect(await run(worker, input)).toMatchObject({ fault: 0, pass: 1 });
+      expect(logging).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(`Cleared stale swarm lock from dead PID ${child.pid}`));
+      expect(await readdir(path.join(root, swarmId))).not.toContain(".runner.lock");
+    } finally {
+      logging.mockRestore();
+    }
+  });
+
   it("uses template defaults and rejects unsafe IDs and over-budget cells before spawning", () => {
     const input = matrix(["a"]);
-    expect(parseMatrix(input, swarmId).concurrency).toBe(8);
+    expect(parseMatrix(input, swarmId)).toMatchObject({ capacityWaitMs: 30 * 60_000, concurrency: 8 });
     expect(parseMatrix({ ...input, template: "browser@1" }, swarmId).concurrency).toBe(6);
     expect(() => parseMatrix(input, "../x")).toThrow("Invalid swarm ID");
+    expect(parseMatrix(matrix(["c"]), "a-b").cells[0]?.id).toBe("c");
+    expect(() => parseMatrix(matrix(["b-c"]), "a")).toThrow();
     expect(() => parseMatrix(matrix(["a", "a"]), swarmId)).toThrow("Duplicate cell ID");
     expect(() => parseMatrix({ ...input, cells: [{ ...cell("a"), turns: ["b", "c"] }] }, swarmId)).toThrow("exceeds turnBudget");
   });

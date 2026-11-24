@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 
 import { Schema } from "effect";
 
@@ -9,15 +10,18 @@ const workspace = Schema.Struct({
   repo: Schema.String.check(Schema.isPattern(/^[a-z\d][a-z\d_.-]*\/[a-z\d][a-z\d_.-]*$/iu)),
   sha: Schema.String.check(Schema.isPattern(/^[a-f\d]{40}$/u)),
 });
+// The last hyphen separates the swarm from the cell. A hyphen-free cell ID makes that split unique.
+const cellId = Schema.String.check(Schema.isPattern(/^[a-z0-9]{1,39}$/u));
 const matrixSchema = Schema.Struct({
-  cells: Schema.Array(Schema.Struct({ brief: nonempty, id: slug, turns: Schema.optionalKey(Schema.Array(nonempty)) })).check(Schema.isMinLength(1)),
+  capacityWaitMs: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ maximum: 2_147_483_647, minimum: 0 }))),
+  cells: Schema.Array(Schema.Struct({ brief: nonempty, id: cellId, turns: Schema.optionalKey(Schema.Array(nonempty)) })).check(Schema.isMinLength(1)),
   concurrency: Schema.optionalKey(positive),
   model: nonempty,
   template: Schema.Literals(["full@1", "browser@1"]),
   turnBudget: positive,
   workspace,
 });
-export type Matrix = typeof matrixSchema.Type & { readonly concurrency: number };
+export type Matrix = typeof matrixSchema.Type & { readonly concurrency: number; readonly capacityWaitMs: number };
 
 export const parseMatrix = (input: unknown, swarmId: string): Matrix => {
   if (!Schema.is(slug)(swarmId)) { throw new Error("Invalid swarm ID: use lowercase letters, digits and hyphens"); }
@@ -29,8 +33,15 @@ export const parseMatrix = (input: unknown, swarmId: string): Matrix => {
     if (`${swarmId}-${cell.id}`.length > 40) { throw new Error(`Peon ID exceeds 40 characters: ${swarmId}-${cell.id}`); }
     if (1 + (cell.turns?.length ?? 0) > matrix.turnBudget) { throw new Error(`Cell ${cell.id} exceeds turnBudget (${matrix.turnBudget})`); }
   }
-  return { ...matrix, concurrency: matrix.concurrency ?? (matrix.template === "browser@1" ? 6 : 8) };
+  return { ...matrix, capacityWaitMs: matrix.capacityWaitMs ?? 30 * 60_000, concurrency: matrix.concurrency ?? (matrix.template === "browser@1" ? 6 : 8) };
 };
+
+export const matrixDigest = ({ cells, model, template, workspace: { repo, sha } }: Matrix) => createHash("sha256").update(JSON.stringify({
+  cells: cells.map(({ brief, id, turns }) => ({ brief, id, turns: turns ?? [] })),
+  model,
+  template,
+  workspace: { repo, sha },
+})).digest("hex");
 
 // Decimal KB; the encoded-length precheck bounds allocation before decoding.
 export const evidenceLimit = 300_000;
@@ -79,8 +90,7 @@ export const parseOutput = (output: string, id: string) => {
   }
 };
 
-export const parseSavedResult = (text: string, id: string): Result => {
-  const input: unknown = JSON.parse(text);
+export const parseSavedResult = (input: unknown, id: string): Result => {
   if (Schema.is(faultSchema)(input) && input.cell === id) { return input; }
   return parseResult(input, id).result;
 };

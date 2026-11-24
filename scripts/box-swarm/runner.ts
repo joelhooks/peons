@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 
-import { evidenceCount, evidenceLimit, parseMatrix, parseOutput, parseSavedResult, WorkerRefusalError } from "./protocol.ts";
+import { acquireLock } from "./lock.ts";
+import { evidenceCount, evidenceLimit, matrixDigest, parseMatrix, parseOutput, parseSavedResult, WorkerRefusalError } from "./protocol.ts";
 import type { Matrix, Report, Result, WorkerPort } from "./protocol.ts";
 
 interface Clock {
@@ -24,35 +25,41 @@ const ensureAvailable = (report: Report) => {
   if (report.state === "destroyed") { throw new Error("Peon is already destroyed; use a new swarm ID"); }
 };
 
-const spawn = async (worker: WorkerPort, input: Parameters<WorkerPort["spawn"]>[0], clock: Clock) => {
+const spawn = async (worker: WorkerPort, input: Parameters<WorkerPort["spawn"]>[0], clock: Clock, capacityWaitMs: number) => {
   let delay = 1000;
+  let deadline: number | undefined;
+  const timedOut = () => new Error(`CapacityTimeout: no box available after ${capacityWaitMs} ms for ${input.peonId}`);
   for (;;) {
     try {
       // oxlint-disable-next-line no-await-in-loop -- do not overlap spawn attempts for this peon
       return await worker.spawn(input);
     } catch (error) {
       if (!(error instanceof WorkerRefusalError && error.status === 429 && error.code === "CapacityFull")) { throw error; }
+      deadline ??= clock.now() + capacityWaitMs;
+      const remaining = deadline - clock.now();
+      if (remaining <= 0) { throw timedOut(); }
       // oxlint-disable-next-line no-await-in-loop -- wait before attempting another allocation
-      await clock.sleep(delay);
+      await clock.sleep(Math.min(delay, remaining));
+      if (clock.now() >= deadline) { throw timedOut(); }
       delay = Math.min(delay * 2, 30_000);
     }
   }
 };
 
-// Inspect has no completed requestId. A matching pending request, a changed lastTurn
-// under this runner's exclusive ownership, or the direct reply provides progress evidence.
+// Inspect has no completed requestId. Under exclusive ownership, a changed
+// lastTurn proves completion. Clearing pending alone does not prove it.
 const runTurn = async (worker: WorkerPort, before: Report, requestId: string, text: string, clock: Clock) => {
   const { peonId } = before;
   const abort = new AbortController();
-  const fired: { report?: Report; error?: unknown } = {};
+  let fireError: unknown;
   let observed = false;
   let inspectError: unknown;
   const deadline = clock.now() + clock.turnTimeoutMs;
   const fire = async () => {
     try {
-      fired.report = await worker.prompt({ peonId, requestId, text }, abort.signal);
+      await worker.prompt({ peonId, requestId, text }, abort.signal);
     } catch (error) {
-      fired.error = error;
+      fireError = error;
     }
   };
   void fire();
@@ -60,7 +67,7 @@ const runTurn = async (worker: WorkerPort, before: Report, requestId: string, te
     while (clock.now() < deadline) {
       // oxlint-disable-next-line no-await-in-loop -- one inspect per polling interval
       await clock.sleep(clock.pollMs);
-      if (definiteRefusal(fired.error)) { throw fired.error; }
+      if (definiteRefusal(fireError)) { throw fireError; }
       let report: Report;
       try {
         // oxlint-disable-next-line no-await-in-loop -- inspect the outcome before scheduling the next poll
@@ -70,7 +77,7 @@ const runTurn = async (worker: WorkerPort, before: Report, requestId: string, te
         inspectError = error;
         continue;
       }
-      if (definiteRefusal(fired.error)) { throw fired.error; }
+      if (definiteRefusal(fireError)) { throw fireError; }
       ensureAvailable(report);
       if (report.pending !== null && report.pending !== undefined) {
         if (report.pending.requestId !== requestId || report.pending.kind !== "prompt") {
@@ -80,13 +87,12 @@ const runTurn = async (worker: WorkerPort, before: Report, requestId: string, te
         continue;
       }
       const { lastTurn } = report;
-      const ack = fired.report;
-      const acknowledged = ack !== undefined && ack.fault === null && (ack.pending === null || ack.pending === undefined) && isDeepStrictEqual(lastTurn, ack.lastTurn);
-      if (lastTurn !== null && (observed || acknowledged || !isDeepStrictEqual(lastTurn, before.lastTurn))) {
+      if (lastTurn !== null && !isDeepStrictEqual(lastTurn, before.lastTurn)) {
         return { report, turn: lastTurn };
       }
+      if (observed) { throw new Error(`TurnLost: ${requestId} cleared without a new lastTurn`); }
     }
-    const cause = inspectError ?? fired.error;
+    const cause = inspectError ?? fireError;
     throw new Error(`No confirmed completion for ${requestId} before the polling deadline${cause === undefined ? "" : `: ${message(cause)}`}`);
   } finally {
     abort.abort();
@@ -181,64 +187,64 @@ const collect = async (options: RunOptions, cellDir: string, cell: Matrix["cells
   return parsed.result;
 };
 
-const runCell = async (options: RunOptions, matrix: Matrix, dir: string, cell: Matrix["cells"][number]): Promise<Entry> => {
-  const { id } = cell;
-  const { worker, swarmId, clock = realClock } = options;
-  const peonId = `${swarmId}-${id}`;
-  const cellDir = path.join(dir, id);
-  const resultPath = path.join(cellDir, "result.json");
+const finish = async (options: RunOptions, cellDir: string, peonId: string, spawned: boolean): Promise<Teardown | null> => {
   const teardownPath = path.join(cellDir, "destroy.json");
-  const spawnPath = path.join(cellDir, "spawned.json");
-  try {
-    const stored = await readSaved(resultPath);
-    if (stored !== null) {
-      const result = parseSavedResult(stored, id);
-      const receipt = await readSaved(teardownPath);
-      return receipt === null ? { result, resumed: true } : { result, resumed: true, teardown: parseTeardown(receipt) };
-    }
-  } catch (error) {
-    return { result: fault(id, `Could not read saved result or receipt: ${message(error)}`), resumed: true };
-  }
-
-  await mkdir(cellDir, { mode: 0o700, recursive: true });
-  let spawned = false;
-  let result: Result;
-  try {
-    // Mischief's idempotent spawn can drive a pending operation on an existing box.
-    // After the first spawn, inspect instead so a resume never replays a prompt.
-    const spawnedReceipt = await readSaved(spawnPath);
-    const expectedReceipt = json({ peonId });
-    let report: Report;
-    if (spawnedReceipt === expectedReceipt) {
-      report = await worker.inspect(peonId);
-    } else if (spawnedReceipt === null) {
-      report = await spawn(worker, {
-        overrides: { model: matrix.model, workspace: matrix.workspace },
-        peonId,
-        template: { name: matrix.template === "browser@1" ? "browser" : "full", version: 1 },
-      }, clock);
-      await save(spawnPath, expectedReceipt);
-    } else {
-      throw new Error("Invalid spawned.json; inspect the peon before rerunning");
-    }
-    spawned = true;
-    result = await collect(options, cellDir, cell, report);
-  } catch (error) {
-    result = fault(id, error);
-  }
-  await save(resultPath, json(result));
-
-  if (options.destroy !== true || !spawned) { return { result, resumed: false }; }
+  const receipt = await readSaved(teardownPath);
+  if (receipt !== null) { return parseTeardown(receipt); }
+  if (options.destroy !== true || !spawned) { return null; }
+  // A crash after this write leaves an ambiguous attempt, never an automatic retry.
+  await save(teardownPath, json({ reason: "Destroy not confirmed after interruption; inspect the peon before acting", status: "fault" }));
   let teardown: Teardown;
   try {
-    await worker.destroy({ discardWorkspace: true, peonId });
+    await options.worker.destroy({ discardWorkspace: true, peonId });
     teardown = { status: "destroyed" };
   } catch (error) {
     const status = error instanceof WorkerRefusalError && error.code === "ReplicaPending" ? "replica-pending" : "fault";
     teardown = { reason: message(error), status };
   }
   await save(teardownPath, json(teardown));
-  return { result, resumed: false, teardown };
+  return teardown;
+};
+
+const runCell = async (options: RunOptions, matrix: Matrix, dir: string, cell: Matrix["cells"][number], digest: string, saved: Result | undefined): Promise<Entry> => {
+  const { id } = cell;
+  const { worker, swarmId, clock = realClock } = options;
+  const peonId = `${swarmId}-${id}`;
+  const cellDir = path.join(dir, id);
+  const spawnPath = path.join(cellDir, "spawned.json");
+  const expectedReceipt = json({ peonId });
+  const spawnedReceipt = await readSaved(spawnPath);
+  let spawned = spawnedReceipt === expectedReceipt;
+  let result: Result;
+  if (saved === undefined) {
+    await mkdir(cellDir, { mode: 0o700, recursive: true });
+    try {
+      let report: Report;
+      if (spawned) {
+        // Idempotent spawn can drive a pending operation; inspect so we never replay a prompt.
+        report = await worker.inspect(peonId);
+      } else if (spawnedReceipt === null) {
+        // Mischief binds spawn/<peonId> internally; a crash before the receipt repeats that exact operation.
+        report = await spawn(worker, {
+          overrides: { model: matrix.model, workspace: matrix.workspace },
+          peonId,
+          template: { name: matrix.template === "browser@1" ? "browser" : "full", version: 1 },
+        }, clock, matrix.capacityWaitMs);
+        await save(spawnPath, expectedReceipt);
+        spawned = true;
+      } else {
+        throw new Error("Invalid spawned.json; inspect the peon before rerunning");
+      }
+      result = await collect(options, cellDir, cell, report);
+    } catch (error) {
+      result = fault(id, error);
+    }
+    await save(path.join(cellDir, "result.json"), json({ ...result, matrixSha256: digest }));
+  } else {
+    result = saved;
+  }
+  const teardown = await finish(options, cellDir, peonId, spawned).catch((error: unknown): Teardown => ({ reason: message(error), status: "fault" }));
+  return { result, resumed: saved !== undefined, ...(teardown === null ? {} : { teardown }) };
 };
 
 const parseTeardown = (text: string): Teardown => {
@@ -263,22 +269,54 @@ const outcomeOf = (pass: boolean | null) => {
   return pass ? "pass" : "fail";
 };
 
+const bindMatrix = async (matrix: Matrix, dir: string, swarmId: string) => {
+  const digest = matrixDigest(matrix);
+  const digestPath = path.join(dir, "matrix.sha256");
+  const previous = await readSaved(digestPath);
+  let maxLength = 39;
+  for (const { id } of matrix.cells) { maxLength = Math.min(maxLength, 39 - id.length); }
+  const proposal = `${swarmId}-next`.slice(0, maxLength);
+  const next = proposal === swarmId ? `${swarmId.startsWith("a") ? "b" : "a"}${swarmId.slice(1)}` : proposal;
+  const refuse = (reason: string) => new Error(`${reason}; use a new swarm ID, e.g. ${next}`);
+  if (previous !== null && previous.trim() !== digest) { throw refuse(`Matrix digest does not match swarm ${swarmId}`); }
+  if (previous === null) {
+    const existing = await readdir(dir, { withFileTypes: true });
+    if (existing.some((file) => !file.name.startsWith(".runner.lock") && !/^matrix\.sha256\.[a-f\d-]+\.tmp$/u.test(file.name))) {
+      throw refuse(`Swarm ${swarmId} already has artifacts but no matrix digest`);
+    }
+    await save(digestPath, `${digest}\n`);
+  }
+  const saved = new Map<string, Result>();
+  // Preflight all results before starting more work or replacing either summary.
+  for (const { id } of matrix.cells) {
+    // oxlint-disable-next-line no-await-in-loop -- read one saved result at a time to bound IO
+    const text = await readSaved(path.join(dir, id, "result.json"));
+    if (text === null) { continue; }
+    let value: unknown;
+    try { value = JSON.parse(text); } catch { throw refuse(`Cell ${id} has unreadable result JSON`); }
+    if (typeof value !== "object" || value === null || !("matrixSha256" in value) || value.matrixSha256 !== digest) {
+      throw refuse(`Cell ${id} has a missing or different matrix digest`);
+    }
+    saved.set(id, parseSavedResult(value, id));
+  }
+  return { digest, saved };
+};
+
 export const runSwarm = async (options: RunOptions) => {
   const { root, swarmId } = options;
   const matrix = parseMatrix(options.input, swarmId);
   const dir = path.join(root, swarmId);
   await mkdir(dir, { mode: 0o700, recursive: true });
-  const lockPath = path.join(dir, ".runner.lock");
-  const lock = await open(lockPath, "wx", 0o600);
+  const release = await acquireLock(path.join(dir, ".runner.lock"));
   try {
-    await lock.writeFile(`${process.pid}\n`);
+    const { digest, saved } = await bindMatrix(matrix, dir, swarmId);
     const jobs = matrix.cells.entries();
     const entries: Entry[] = [];
     await Promise.all(Array.from({ length: Math.min(matrix.cells.length, matrix.concurrency) }, async () => {
       for (const [index, cell] of jobs) {
         try {
           // oxlint-disable-next-line no-await-in-loop -- this worker holds one slot until the cell is accounted for
-          entries[index] = await runCell(options, matrix, dir, cell);
+          entries[index] = await runCell(options, matrix, dir, cell, digest, saved.get(cell.id));
         } catch (error) {
           entries[index] = { result: fault(cell.id, error), resumed: false };
         }
@@ -294,7 +332,7 @@ export const runSwarm = async (options: RunOptions) => {
       const detail = "fault" in cell ? cell.fault : [cell.failedStep, cell.notes].filter(Boolean).join(": ");
       return `| ${cell.cell} | ${outcome} | ${cell.resumed ? "yes" : "no"} | ${md(detail)} | ${md(teardownText(cell.teardown))} |`;
     });
-    const summary = { cells, ...counts, swarmId };
+    const summary = { cells, ...counts, matrixSha256: digest, swarmId };
     await save(path.join(dir, "summary.json"), json(summary));
     await save(path.join(dir, "SUMMARY.md"), [
       `# Box swarm ${swarmId}`, "", `${counts.pass} pass · ${counts.fail} fail · ${counts.fault} fault`, "",
@@ -302,7 +340,6 @@ export const runSwarm = async (options: RunOptions) => {
     ].join("\n"));
     return summary;
   } finally {
-    await lock.close();
-    await unlink(lockPath);
+    await release();
   }
 };
