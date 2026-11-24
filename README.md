@@ -39,7 +39,7 @@ Think peons (`change-review`, `investigation`) are one Mischief think each: the 
 
 ### The Pi extension
 
-The `pi` key loads `extensions/pi`. A desk runs a peon in one call, or builds a workflow from peon steps, on a Mischief host. Every tool refuses with a 4-line prompt (`Tag`, `Accepted`, `Fix`, `Debug`). No tool sends mail, archives, pushes, deploys or starts a timer. To wait on a run, watch `peon_status`.
+The `pi` key loads `extensions/pi`. A desk runs a peon in one call, or builds a workflow from peon steps, on a Mischief host. Every tool refuses with a 4-line prompt (`Tag`, `Accepted`, `Fix`, `Debug`). The run tools do not send mail, archive, push, deploy or start a timer. To inspect a run, use `peon_status`; to schedule a durable check, use the watch tools below.
 
 | Tool | What it does |
 |---|---|
@@ -64,6 +64,18 @@ The run tools need a host, an identity and a desk name. A fleet desk needs no en
 `MISCHIEF_AUDIENCE` overrides the default worker audience. `retry-once-on:<tag>` is refused until Mischief can route a step failure by tag.
 
 `pnpm check:pi` type-checks `extensions/` against the installed Pi (`PI_CODING_AGENT_DIR`, else the `pi` launcher on PATH, else npm's global root). The gate is `tsc -p . && pnpm test && pnpm check:pi`.
+
+### Durable watches
+
+`watch_arm({ requestId, kind, condition, intervalSeconds, timeoutSeconds, notify, message, label })` schedules an allowlisted HTTPS GET or a Mischief peon-state check. Use `kind: "once"` or `"repeat"` and an interval of at least 60 seconds. `notify.to` wakes up to four recipients; `notify.cc` delivers quietly. Keep URLs and messages free of secrets and private session context. `watch_list({ owner?, target? })` filters by caller DID or recipient. `watch_status({ watchId })` shows the last check, cursor, evidence, and firings. The owner or Switchboard can stop checks with `watch_cancel` or `watch_complete`, both taking `{ watchId, requestId }`. Reuse the same request ID and inputs on a retry.
+
+`watch_arm({ fromUntil: "<id>" })` moves an active, unfired pi-until watch. Pi recognizes these exact shell forms without running them:
+
+- `[ "$(curl -s -o /dev/null -w '%{http_code}' https://status.example.com/health)" = 200 ]`
+- `shitrat checks owner/repo <commit-sha> | grep -q 'ci.*completed'` (matches the exact check name `ci` against GitHub's check-runs API, not a successful conclusion or a private repo credential)
+- `inspectPeon <peon-id> | jq -e '.state == "idle" and .pending == null'` (`peon_status <peon-id>` is also recognized; a workflow run ID is not a peon ID)
+
+Local file, pane and process predicates stay in pi-until, as do watches with immediate or pending wakes or session-only context references. Supply `timeoutSeconds` if the session watch has no expiry. The tool observes new watch starts and reads restored definitions from pi-until's suspension entries without editing them; `/reload` journals an active watch if no definition is available. Mischief must acknowledge the arm before Pi cancels the local watch. If cancellation is unconfirmed, inspect both watches before retrying or cancelling either one.
 
 ### Reading a peon's output
 
