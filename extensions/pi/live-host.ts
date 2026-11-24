@@ -16,6 +16,8 @@ import type { Prompt } from "../../src/compile.ts";
 import { RunReport } from "../../src/run-report.ts";
 import { AnswerRefused, HostFailure, PlanRefused, ReplyRefused, UnknownRun } from "./host.ts";
 import type { RunHostPort } from "./host.ts";
+import { ArmAck, MutationAck, WatchList, WatchRefused, WatchStatus } from "./watch-contract.ts";
+import type { WatchHostPort } from "./watch-contract.ts";
 
 export const DEFAULT_AUDIENCE = "did:web:mischief.worker.pi.ratking-fleet.invalid#mischief";
 const DEBUG = "read extensions/pi/live-host.ts in joelhooks/peons";
@@ -79,9 +81,9 @@ export interface LiveOptions {
 
 const unexpected = (name: string) => (error: { readonly _tag: string }) => Effect.fail(failure(`called Mischief ${name}`, `the worker answered ${error._tag}, which ${name} does not declare`, "retry the same call"));
 
-export const liveRunHost = (options: LiveOptions): RunHostPort => {
+const signedCapability = (options: LiveOptions) => {
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
-  const call = (name: "submitPlan" | "inspectRun" | "deliverReply" | "answerRun" | "abortRun", input: unknown) =>
+  return (name: string, input: unknown) =>
     Effect.gen(function* callGen() {
       const did = `called Mischief ${name}`;
       const signer = yield* options.signer.pipe(Effect.mapError((refusal) => new HostFailure({ message: refusal.message })));
@@ -104,7 +106,19 @@ export const liveRunHost = (options: LiveOptions): RunHostPort => {
         catch: () => failure(did, `the worker returned non-JSON (HTTP ${response.status})`, "check that MISCHIEF_HOST points at a Mischief worker"),
         try: async (): Promise<unknown> => await response.json(),
       });
-      if (!response.ok) {
+      return { body, ok: response.ok, status: response.status };
+    });
+};
+
+const httpRefused = (name: string, status: number) =>
+  failure(`called Mischief ${name}`, `the worker refused the call (HTTP ${status})`, status === 401 || status === 403 ? "check that this desk's DID is on the worker's caller list and has the capability grant" : "inspect the worker version and capability projection");
+
+export const liveRunHost = (options: LiveOptions): RunHostPort => {
+  const send = signedCapability(options);
+  const call = (name: "submitPlan" | "inspectRun" | "deliverReply" | "answerRun" | "abortRun", input: unknown) =>
+    Effect.gen(function* callRunGen() {
+      const { body, ok, status } = yield* send(name, input);
+      if (!ok) {
         const declared = decodeDeclared(body);
         if (declared._tag === "Some") {
           const {value} = declared;
@@ -113,10 +127,10 @@ export const liveRunHost = (options: LiveOptions): RunHostPort => {
           if (value._tag === "AnswerRefused") {return yield* new AnswerRefused({ reason: value.reason, runId: value.runId });}
           return yield* new ReplyRefused({ reason: value.reason, replyTo: value.replyTo });
         }
-        return yield* failure(did, `the worker refused the call (HTTP ${response.status})`, response.status === 401 || response.status === 403 ? "check that this desk's DID is on the worker's caller list" : "inspect the worker version and capability projection");
+        return yield* httpRefused(name, status);
       }
       const report = decodeReport(body);
-      if (Result.isFailure(report)) {return yield* failure(did, "the worker answered outside the RunReport schema", "check the worker and peons pins");}
+      if (Result.isFailure(report)) {return yield* failure(`called Mischief ${name}`, "the worker answered outside the RunReport schema", "check the worker and peons pins");}
       return report.success;
     });
 
@@ -127,6 +141,28 @@ export const liveRunHost = (options: LiveOptions): RunHostPort => {
       call("deliverReply", line).pipe(Effect.catchTags({ AnswerRefused: unexpected("deliverReply"), PlanRefused: unexpected("deliverReply"), UnknownRun: (unknown) => Effect.fail(new ReplyRefused({ reason: `run ${unknown.runId} is unknown`, replyTo: line.replyTo })) })),
     inspect: (runId) => call("inspectRun", { runId }).pipe(Effect.catchTags({ AnswerRefused: unexpected("inspectRun"), PlanRefused: unexpected("inspectRun"), ReplyRefused: unexpected("inspectRun") })),
     submit: (runId, plan, docs) => call("submitPlan", { docs, plan, runId }).pipe(Effect.catchTags({ AnswerRefused: unexpected("submitPlan"), ReplyRefused: unexpected("submitPlan"), UnknownRun: unexpected("submitPlan") })),
+  };
+};
+
+export const liveWatchHost = (options: LiveOptions): WatchHostPort => {
+  const send = signedCapability(options);
+  const call = <S extends Schema.ConstraintDecoder<unknown>>(name: string, input: unknown, schema: S) =>
+    Effect.gen(function* callWatchGen() {
+      const { body, ok, status } = yield* send(name, input);
+      if (!ok) {
+        const refused = Schema.decodeUnknownResult(WatchRefused)(body);
+        return yield* Result.isSuccess(refused) ? Effect.fail(refused.success) : Effect.fail(httpRefused(name, status));
+      }
+      return yield* Schema.decodeUnknownEffect(schema)(body).pipe(
+        Effect.mapError(() => failure(`called Mischief ${name}`, "the worker answered outside the durable watch schema", "check the worker and peons pins, then retry with the same requestId if supplied")),
+      );
+    });
+  return {
+    arm: (input) => call("armWatch", input, ArmAck),
+    cancel: (input) => call("cancelWatch", input, MutationAck),
+    complete: (input) => call("completeWatch", input, MutationAck),
+    inspect: (input) => call("inspectWatch", input, WatchStatus),
+    list: (input) => call("listWatches", input, WatchList),
   };
 };
 

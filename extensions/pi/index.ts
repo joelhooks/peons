@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { Cause, Effect, Exit, Schema } from "effect";
 import { Type } from "typebox";
 
@@ -15,11 +15,14 @@ import { PeonRequest } from "../../src/contract.ts";
 import { Prompt, prompt } from "../../src/compile.ts";
 import { loadCatalog } from "./catalog.ts";
 import type { Catalog } from "./catalog.ts";
-import { leasedSigner, liveEnv, liveRunHost } from "./live-host.ts";
-import type { FleetConfig } from "./live-host.ts";
+import { leasedSigner, liveEnv, liveRunHost, liveWatchHost } from "./live-host.ts";
+import type { FleetConfig, LiveOptions } from "./live-host.ts";
 import type { RunHostPort } from "./host.ts";
 import { makeTools } from "./tools.ts";
 import type { Files, ToolOutput } from "./tools.ts";
+import { makeWatchTools } from "./watch-tools.ts";
+import { makeUntilReader } from "./watch-until.ts";
+import type { UntilContext } from "./watch-until.ts";
 
 const Input = {
   brief: Type.Optional(Type.String({ description: "The request in plain words. Never include secrets." })),
@@ -85,19 +88,102 @@ const deskName = (env: NodeJS.ProcessEnv): Effect.Effect<string, Prompt> => {
     : Effect.fail(prompt({ accepted: "PEONS_DESK=<this desk's Rat King name, like agent-graph/desk>", debug: DEBUG, did: "called a peons tool that addresses a desk", fix: "export PEONS_DESK in the desk's environment, /reload, then call the tool again", tag: "DeskUnset", why: name === undefined ? "neither PEONS_DESK nor RATKING_NAME is set" : "PEONS_DESK is not a Rat King desk name" }));
 };
 
+const WATCH_TOOLS = ["watch_arm", "watch_list", "watch_status", "watch_cancel", "watch_complete"] as const;
+const Condition = Type.Union([
+  Type.Object({
+    expect: Type.Object({ equals: Type.Optional(Type.Unknown()), jsonPath: Type.Optional(Type.String()), regex: Type.Optional(Type.String()), status: Type.Optional(Type.Integer()) }),
+    type: Type.Literal("http"), url: Type.String({ description: "Allowlisted HTTPS URL. Never include credentials or secrets." }),
+  }),
+  Type.Object({
+    expect: Type.Object({ pendingClear: Type.Optional(Type.Literal(true)), state: Type.Optional(Type.String()) }),
+    peonId: Type.String(), type: Type.Literal("peon"),
+  }),
+]);
+const Mutate = Type.Object({ requestId: Type.String(), watchId: Type.String() });
+
+const registerWatchTools = (pi: ExtensionAPI, liveOptions: (tool: string) => Effect.Effect<LiveOptions, Prompt>, desk: () => Effect.Effect<string, Prompt>) => {
+  const reader = makeUntilReader();
+  pi.on("session_start", reader.clear);
+  pi.on("tool_result", reader.observe);
+  const execute = (name: typeof WATCH_TOOLS[number]) => async (_id: string, params: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionToolContext) => {
+    const until = reader.port({
+      appendEntry: (type, data) => {pi.appendEntry(type, data);},
+      executeTool: async (tool, args) => {
+        const result: Awaited<ReturnType<UntilContext["executeTool"]>> = await ctx.executeTool(tool, args);
+        return result;
+      },
+      sessionManager: ctx.sessionManager,
+    });
+    const tools = makeWatchTools({ desk: desk(), host: liveOptions(name).pipe(Effect.map(liveWatchHost)), until });
+    const exit = await Effect.runPromiseExit(tools[name](params), signal === undefined ? undefined : { signal });
+    return Exit.isSuccess(exit)
+      ? { content: [{ text: exit.value.text, type: "text" as const }], details: exit.value.data, isError: exit.value.isError }
+      : { content: [{ text: `WatchCallInterrupted: ${name} stopped without a confirmed result. Check watch_list before retrying. For a mutation, reuse the same requestId.`, type: "text" as const }], details: { tag: "WatchCallInterrupted" }, isError: true };
+  };
+  pi.registerTool({
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true, readOnlyHint: false },
+    description: "Arm a Mischief durable HTTP or peon watch with a stable requestId and secret-free Rat King message. Or pass fromUntil to move an active, unfired session watch; the local watch is cancelled only after Mischief acknowledges the arm.",
+    execute: execute("watch_arm"),
+    label: "Arm durable watch",
+    name: "watch_arm",
+    // Pi bridges need one top-level object. Effect decodes exactly one of the two shapes.
+    parameters: Type.Object({
+      condition: Type.Optional(Condition),
+      fromUntil: Type.Optional(Type.String({ description: "Session watch ID; supply no direct arm fields, except timeoutSeconds if needed." })),
+      intervalSeconds: Type.Optional(Type.Integer({ minimum: 60 })),
+      kind: Type.Optional(Type.Union([Type.Literal("once"), Type.Literal("repeat")])),
+      label: Type.Optional(Type.String()),
+      message: Type.Optional(Type.Object({ body: Type.String({ maxLength: 20_000 }), summary: Type.String({ maxLength: 280 }) })),
+      notify: Type.Optional(Type.Object({ cc: Type.Array(Type.String()), to: Type.Array(Type.String(), { maxItems: 4 }) })),
+      requestId: Type.Optional(Type.String()),
+      timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1 })),
+    }),
+    reachesTools: () => ["until"],
+  });
+  pi.registerTool({
+    annotations: { openWorldHint: true, readOnlyHint: true },
+    description: "List durable watches, optionally filtered by owner DID or Rat King recipient name.",
+    execute: execute("watch_list"), label: "List durable watches", name: "watch_list",
+    parameters: Type.Object({ owner: Type.Optional(Type.String()), target: Type.Optional(Type.String()) }),
+  });
+  pi.registerTool({
+    annotations: { openWorldHint: true, readOnlyHint: true },
+    description: "Read a durable watch's state, last check, cursor, recent evidence and firing receipts.",
+    execute: execute("watch_status"), label: "Durable watch status", name: "watch_status",
+    parameters: Type.Object({ watchId: Type.String() }),
+  });
+  pi.registerTool({
+    annotations: { idempotentHint: true, openWorldHint: true, readOnlyHint: false },
+    description: "Stop a durable watch without marking it complete. Owner or Switchboard only.",
+    execute: execute("watch_cancel"), label: "Cancel durable watch", name: "watch_cancel", parameters: Mutate,
+  });
+  pi.registerTool({
+    annotations: { idempotentHint: true, openWorldHint: true, readOnlyHint: false },
+    description: "Mark a durable watch complete and stop further checks. Owner or Switchboard only.",
+    execute: execute("watch_complete"), label: "Complete durable watch", name: "watch_complete", parameters: Mutate,
+  });
+  return WATCH_TOOLS;
+};
+
 export default function peons(pi: ExtensionAPI) {
   let catalog: Promise<Catalog> | null = null;
   let host: RunHostPort | null = null;
+  let live: LiveOptions | null = null;
+  const liveOptions = (tool: string) => Effect.gen(function* liveOptionsGen() {
+    if (live !== null) {return live;}
+    const config = yield* fleetConfig;
+    const env = liveEnv(process.env, tool, config);
+    if (env instanceof Prompt) {return yield* Effect.fail(env);}
+    live = { audience: env.audience, endpoint: env.endpoint, fetch, signer: leasedSigner(env.secretName) };
+    return live;
+  });
   const tools = (cwd: string, tool: string) =>
     Effect.gen(function* toolsGen() {
       catalog ??= Effect.runPromise(loadCatalog(ROOT));
       const loaded = yield* Effect.tryPromise({ catch: () => prompt({ accepted: "a peons checkout whose pnpm test passes", debug: DEBUG, did: "loaded the peons catalog", fix: "run pnpm test in joelhooks/peons, fix what fails, then /reload", tag: "CatalogUnreadable", why: "routing.json, catalog.json or templates/ did not decode" }), try: async () => await (catalog ?? Promise.reject(new Error("unloaded"))) });
       const hostEffect = Effect.gen(function* hostGen() {
         if (host !== null) {return host;}
-        const config = yield* fleetConfig;
-        const env = liveEnv(process.env, tool, config);
-        if (env instanceof Prompt) {return yield* Effect.fail(env);}
-        host = liveRunHost({ audience: env.audience, endpoint: env.endpoint, fetch, signer: leasedSigner(env.secretName) });
+        host = liveRunHost(yield* liveOptions(tool));
         return host;
       });
       return makeTools({ catalog: loaded, checkout: process.env.PEONS_CHECKOUT === "on", cwd, desk: deskName(process.env), files, host: hostEffect });
@@ -204,10 +290,11 @@ export default function peons(pi: ExtensionAPI) {
     parameters: Type.Object({ runId: Type.Optional(Type.String({ description: "Required for v1; omit for v2 (attempt ids are content-derived)" })), workflow: Type.String({ description: "The path workflow_define returned" }), ...Input }),
   });
 
+  const watches = registerWatchTools(pi, liveOptions, () => deskName(process.env));
   pi.on("session_start", () => {
     const active: readonly string[] = pi.getActiveTools();
     const on = new Set<string>(active);
-    const inactive = PEON_TOOLS.filter((name) => !on.has(name));
+    const inactive = [...PEON_TOOLS, ...watches].filter((name) => !on.has(name));
     if (inactive.length > 0) {
       pi.setActiveTools([...active, ...inactive]);
     }
